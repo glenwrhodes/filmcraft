@@ -48,7 +48,8 @@ written into the database. `file.importResolve {path, background: true}` reads t
 opens its media on a worker thread (the app shows "Linking media n of N" and can cancel);
 `file.resolveImportStatus` reports progress and merges the result once it is ready, into the
 project it was started in only: if that project is closed or replaced meanwhile, the import is
-cancelled. Frame counts
+cancelled. A relative media path is taken from the project folder and kept as that absolute
+path. Frame counts
 whose ticks would leave the range a project can hold are reported and skipped, never clamped.
 
 ## AAF and OMF

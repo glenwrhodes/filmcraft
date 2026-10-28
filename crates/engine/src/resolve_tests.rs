@@ -354,3 +354,37 @@ fn an_import_never_lands_in_a_project_opened_meanwhile() {
     s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
     assert_eq!(wait_for(&mut s).unwrap()["linkedMedia"], 1);
 }
+
+/// A relative media path is the database's, in the background and at once: it opens the file next
+/// to `Project.db` even when another document stored the same text first, and the project keeps
+/// that file, not text a saved project would take from its own folder.
+#[test]
+fn relative_media_paths_are_taken_from_the_database_folder() {
+    let root = tmp_dir("resolve-relative");
+    let project = root.join("Weekend Cut");
+    std::fs::create_dir_all(project.join("media")).unwrap();
+    make_movie(&project.join("media").join("a.mov"), filmcraft_media::DemoScene::Aurora, 64, 36, 48);
+    std::fs::write(project.join("Project.db"), database("media/a.mov")).unwrap();
+    let movie = p(&project.join("media").join("a.mov"));
+    for background in [true, false] {
+        let mut s = session();
+        // another document, in a folder without the file, stored the same relative text first
+        s.media.add_stored_paths(["media/a.mov".to_string()], Some(&p(&root.join("elsewhere").join("other.fcproj"))));
+        let r = s.execute("file.importResolve", json!({ "path": p(&project), "background": background })).unwrap();
+        let r = if background { wait_for(&mut s).unwrap() } else { r };
+        assert_eq!(r["linkedMedia"], 1, "{r}");
+        let paths: Vec<String> = s
+            .project
+            .items
+            .values()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Media(m) => match &m.media {
+                    MediaRef::File { path } => Some(path.clone()),
+                    MediaRef::Generator(_) => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths, [movie.as_str()]);
+    }
+}

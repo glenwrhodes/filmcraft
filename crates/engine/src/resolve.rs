@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use filmcraft_project::{ItemKind, MediaRef};
+use filmcraft_project::MediaRef;
 use serde_json::{Value, json};
 
 use crate::interchange::{Probe, probe};
@@ -187,23 +187,27 @@ fn prepare_bytes(services: &dyn Services, media: &MediaPool, db: &str, bytes: &[
     // the project folder's name, for a database that names no project
     let folder = std::path::Path::new(db).parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
     let opts = filmcraft_interchange::ImportOptions { name: folder, ..Default::default() };
-    let (fragment, mut report) = filmcraft_interchange::resolve::import(bytes, &opts).map_err(|e| format!("{db}: {e}"))?;
+    let (mut fragment, mut report) = filmcraft_interchange::resolve::import(bytes, &opts).map_err(|e| format!("{db}: {e}"))?;
     // Resolve writes recent changes to a write-ahead log first while the project is open
     if services.file_size(&format!("{db}-wal")).is_ok_and(|n| n > 0) {
         report.warn("DaVinci Resolve has changes that are not saved into Project.db yet (the project is probably open in Resolve): close it there and import again to include them");
     }
-    let mut paths: Vec<String> = fragment
-        .project
-        .items
-        .values()
-        .filter_map(|i| match &i.kind {
-            ItemKind::Media(m) => match &m.media {
-                MediaRef::File { path } => Some(path.clone()),
-                MediaRef::Generator(_) => None,
-            },
-            _ => None,
-        })
-        .collect();
+    let mut paths = Vec::new();
+    for m in fragment.project.items.values_mut().filter_map(|i| i.as_media_mut()) {
+        if let MediaRef::File { path } = &mut m.media {
+            // A relative path is the database's: taken from its folder here, so the project keeps
+            // that file. Kept as it was, it would resolve against whichever document stored the
+            // same text first (the pool keys stored paths by their text), or against the
+            // FilmCraft project once that is saved.
+            if !cfg!(target_arch = "wasm32")
+                && relative(path)
+                && let Ok(file) = crate::doc_path::resolve(path, Some(std::path::Path::new(db)))
+            {
+                *path = file;
+            }
+            paths.push(path.clone());
+        }
+    }
     paths.sort();
     paths.dedup();
     // Opened as stored paths of the database, but not recorded in the shared pool: a cancelled
@@ -220,6 +224,13 @@ fn prepare_bytes(services: &dyn Services, media: &MediaPool, db: &str, bytes: &[
         progress.done.store(n + 1, Ordering::Relaxed);
     }
     Ok(Prepared { db: db.to_string(), fragment, report, probed })
+}
+
+/// Whether a stored media path is relative to the document: not absolute here, nor a drive
+/// (`C:`) or share (`\\`) path of another system, which no document folder makes a file here.
+fn relative(path: &str) -> bool {
+    let b = path.as_bytes();
+    std::path::Path::new(path).is_relative() && !b.starts_with(br"\\") && !matches!((b.first(), b.get(1)), (Some(l), Some(b':')) if l.is_ascii_alphabetic())
 }
 
 const CANCELLED: &str = "the DaVinci Resolve import was cancelled";
