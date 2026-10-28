@@ -1601,7 +1601,18 @@ fn build() -> Vec<CommandSpec> {
             // in the background: the app stays responsive while the media files are opened
             if bool_p(p, "background").unwrap_or(false) { crate::resolve::start(s, &path) } else { crate::resolve::import(s, &path) }
         }),
-        query!("file.resolveImportStatus", "DaVinci Resolve Import Status", "{}", |s, _| crate::resolve::status(s)),
+        // Not a `query!`: once the import has finished, the poll merges it into the project (its
+        // own undo step), so it is no pure read; it stays out of the journal like a query.
+        CommandSpec {
+            id: "file.resolveImportStatus",
+            label: "DaVinci Resolve Import Status",
+            menu: &[],
+            shortcut: None,
+            params: "{}",
+            enabled: always,
+            run: |s, _| crate::resolve::status(s),
+            journal: false,
+        },
         cmd!("file.cancelResolveImport", "Cancel DaVinci Resolve Import", [], None, "{}", always, |s, _| Ok(json!({ "cancelled": s.cancel_resolve_import() }))),
         query!("file.listResolveProjects", "List DaVinci Resolve Projects", r#"{"root":str?}"#, |s, p| Ok(crate::resolve::list(s, str_p(p, "root")))),
         cmd!("file.save", "Save", ["File"], Some("Cmd+S"), r#"{"path":str?}"#, always, |s, p| {

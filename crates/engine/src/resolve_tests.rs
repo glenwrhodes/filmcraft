@@ -209,17 +209,24 @@ fn a_cancelled_background_import_changes_nothing() {
     let mut s = session();
     let before = s.project.items.len();
     let revision = s.revision;
-    s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
-    assert_eq!(s.execute("file.cancelResolveImport", json!({})).unwrap()["cancelled"], json!(true));
-    // it may finish before it sees the flag; either way the project is whole
-    match wait_for(&mut s) {
-        Err(e) => {
-            assert!(e.contains("cancelled"), "{e}");
-            assert_eq!((s.project.items.len(), s.revision), (before, revision));
+    // cancelled at once (while the worker reads the database or opens the media) and, the case
+    // the worker never sees, after it has finished but before the result is collected
+    for late in [false, true] {
+        s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+        if late {
+            let progress = s.resolve_import.as_ref().unwrap().progress.clone();
+            while progress.done.load(std::sync::atomic::Ordering::Relaxed) < 1 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            // (the result lands just after the last file is counted)
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        Ok(done) => assert_eq!(done["linkedMedia"], 1),
+        assert_eq!(s.execute("file.cancelResolveImport", json!({})).unwrap()["cancelled"], json!(true));
+        let e = wait_for(&mut s).unwrap_err();
+        assert!(e.contains("cancelled"), "late: {late}: {e}");
+        assert_eq!((s.project.items.len(), s.revision), (before, revision), "late: {late}");
+        assert!(s.resolve_import.is_none());
     }
-    assert!(s.resolve_import.is_none());
     assert_eq!(s.execute("file.cancelResolveImport", json!({})).unwrap()["cancelled"], json!(false));
 }
 

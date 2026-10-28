@@ -75,7 +75,8 @@ pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Resu
         }
         _ => filmcraft_interchange::import_with(bytes, format, &opts).map_err(|e| EngineError::Other(format!("{path}: {e}")))?,
     };
-    merge_fragment(s, path, fragment, report, format.name(), opts.name.clone(), format == Format::Edl, &mut std::collections::HashMap::new())
+    let kind = Kind { format_name: format.name(), name: opts.name.clone(), rebase_timecode: format == Format::Edl };
+    merge_fragment(s, path, fragment, report, kind, &mut std::collections::HashMap::new())
 }
 
 /// A media file of an imported document, opened ahead of [`merge_fragment`] (on a worker
@@ -107,19 +108,27 @@ pub(crate) fn probe(media: &crate::media_pool::MediaPool, services: &dyn crate::
     }
 }
 
+/// What kind of document [`merge_fragment`] merges.
+pub(crate) struct Kind<'a> {
+    pub format_name: &'a str,
+    /// For the undo step (`Import <name>`); the format's name when `None`.
+    pub name: Option<String>,
+    /// Source positions count from the media's start timecode (EDL), so they are rebased once
+    /// the file is probed.
+    pub rebase_timecode: bool,
+}
+
 /// Merge an imported fragment into the project (one undo step), link each media file that
-/// exists on disk, and open the first new sequence. `rebase_timecode`: source positions count
-/// from the media's start timecode (EDL), so they are rebased once the file is probed.
+/// exists on disk (using `probed` for files opened already), and open the first new sequence.
 pub(crate) fn merge_fragment(
     s: &mut Session,
     path: &str,
     fragment: filmcraft_interchange::Imported,
     report: filmcraft_interchange::Report,
-    format_name: &str,
-    name: Option<String>,
-    rebase_timecode: bool,
+    kind: Kind,
     probed: &mut std::collections::HashMap<String, Probe>,
 ) -> Result<Value> {
+    let Kind { format_name, name, rebase_timecode } = kind;
     for item in fragment.project.items.values() {
         if let ItemKind::Sequence(sequence) = &item.kind {
             sequence.settings.validate().map_err(|e| EngineError::Other(format!("{path}: invalid imported sequence settings: {e}")))?;

@@ -341,6 +341,10 @@ pub fn show_import_resolve(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool 
         }) {
             app.ui.status = e;
         }
+        // a host whose picker answers at once has started the import already: show its progress
+        if app.dialog == Some(Dialog::ImportResolve) && app.session.resolve_import.is_some() {
+            return true;
+        }
     }
     if !open {
         app.file_dialogs.resolve_projects = None;

@@ -223,7 +223,8 @@ const CANCELLED: &str = "the DaVinci Resolve import was cancelled";
 /// Merge what [`prepare`] read into the project.
 fn apply(s: &mut Session, mut p: Prepared) -> Result<Value> {
     let name = p.fragment.project.name.clone();
-    crate::interchange::merge_fragment(s, &p.db, p.fragment, p.report, filmcraft_interchange::resolve::FORMAT_NAME, Some(name), false, &mut p.probed)
+    let kind = crate::interchange::Kind { format_name: filmcraft_interchange::resolve::FORMAT_NAME, name: Some(name), rebase_timecode: false };
+    crate::interchange::merge_fragment(s, &p.db, p.fragment, p.report, kind, &mut p.probed)
 }
 
 /// `file.importResolve {path}`: `path` is a project folder or its `Project.db`.
@@ -292,9 +293,14 @@ impl Session {
     /// Merge a background Resolve import that has finished (`None` while none is, or it is
     /// still running). A cancelled import is an error and leaves the project as it was.
     pub fn poll_resolve_import(&mut self) -> Option<Result<Value>> {
-        let r = self.resolve_import.as_ref()?.result.lock().unwrap_or_else(PoisonError::into_inner).take()?;
+        let running = self.resolve_import.as_ref()?;
+        let r = running.result.lock().unwrap_or_else(PoisonError::into_inner).take()?;
+        // The worker looks at the flag only between media files: a cancel while it read the
+        // database, after its last file, or for a project without media must still hold.
+        let cancelled = running.progress.cancel.load(Ordering::Relaxed);
         self.resolve_import = None;
         Some(match r {
+            Ok(_) if cancelled => Err(EngineError::Other(CANCELLED.into())),
             Ok(p) => apply(self, p),
             Err(e) => Err(EngineError::Other(e)),
         })
