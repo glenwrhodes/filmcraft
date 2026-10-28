@@ -203,7 +203,8 @@ fn prepare_bytes(services: &dyn Services, media: &MediaPool, db: &str, bytes: &[
         .collect();
     paths.sort();
     paths.dedup();
-    media.add_stored_paths(paths.iter().cloned(), Some(db));
+    // Opened as stored paths of the database, but not recorded in the shared pool: a cancelled
+    // or failed import leaves nothing behind; merge_fragment records them once it is merged.
     progress.total.store(paths.len(), Ordering::Relaxed);
     progress.set_stage("Linking media");
     let mut probed = HashMap::new();
@@ -211,7 +212,7 @@ fn prepare_bytes(services: &dyn Services, media: &MediaPool, db: &str, bytes: &[
         if progress.cancel.load(Ordering::Relaxed) {
             return Err(CANCELLED.into());
         }
-        let p = probe(media, services, &path);
+        let p = probe(media, services, &path, Some(db));
         probed.insert(path, p);
         progress.done.store(n + 1, Ordering::Relaxed);
     }

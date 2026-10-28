@@ -84,27 +84,42 @@ pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Resu
 pub(crate) enum Probe {
     /// The stored path leads nowhere usable (why).
     NotFollowed(String),
-    /// The file is there but cannot be read as media.
-    Unreadable,
-    Opened {
-        src: filmcraft_media::SharedSource,
-        identity: Option<filmcraft_project::MediaIdentity>,
-    },
+    /// `file`, the path `stored` led to, is there but cannot be read as media.
+    Unreadable { file: String },
+    /// `file` is the path `stored` led to.
+    Opened { file: String, src: filmcraft_media::SharedSource, identity: Option<filmcraft_project::MediaIdentity> },
 }
 
-/// Open the media file a document stores as `stored` (its stored paths must already be known to
-/// `media`: [`crate::media_pool::MediaPool::add_stored_paths`]).
-pub(crate) fn probe(media: &crate::media_pool::MediaPool, services: &dyn crate::Services, stored: &str) -> Probe {
-    let file = match media.follow(stored) {
+impl Probe {
+    /// Whether this is still what opening `stored` would give: it led to the same file (or, for
+    /// a path that led nowhere, still does). Only then may a merge use it as it is.
+    fn still_holds(&self, media: &crate::media_pool::MediaPool, stored: &str) -> bool {
+        match (self, media.follow(stored)) {
+            (Probe::NotFollowed(_), Err(_)) => true,
+            (Probe::Unreadable { file } | Probe::Opened { file, .. }, Ok(now)) => *file == now,
+            _ => false,
+        }
+    }
+}
+
+/// Open the media file a document stores as `stored`. With `document`, the path is resolved as
+/// a stored path of that document without recording it (an import that may still be dropped);
+/// without, it must be recorded already ([`crate::media_pool::MediaPool::add_stored_paths`]).
+pub(crate) fn probe(media: &crate::media_pool::MediaPool, services: &dyn crate::Services, stored: &str, document: Option<&str>) -> Probe {
+    let followed = match document {
+        Some(d) => media.follow_as(stored, d),
+        None => media.follow(stored),
+    };
+    let file = match followed {
         Ok(file) => file,
         Err(why) => return Probe::NotFollowed(why.to_string()),
     };
     match media.open_file(&file, services) {
         Ok(src) => {
             let identity = crate::relink::identity_of(services, &file).ok();
-            Probe::Opened { src, identity }
+            Probe::Opened { file, src, identity }
         }
-        Err(_) => Probe::Unreadable,
+        Err(_) => Probe::Unreadable { file },
     }
 }
 
@@ -165,15 +180,19 @@ pub(crate) fn merge_fragment(
     let mut linked = 0;
     let mut offline = Vec::new();
     for (id, mpath) in new_media {
-        // opened already (in the background), or now
-        let opened = probed.remove(&mpath).unwrap_or_else(|| probe(&s.media, &*s.services, &mpath));
+        // Opened already (in the background, failures included, so a slow or damaged file is
+        // not read again here) while the path still leads where it did; else now.
+        let opened = match probed.remove(&mpath) {
+            Some(p) if p.still_holds(&s.media, &mpath) => p,
+            _ => probe(&s.media, &*s.services, &mpath, None),
+        };
         match opened {
             Probe::NotFollowed(why) => {
                 log::warn!("{mpath} is not opened: {why}");
                 offline.push(mpath);
             }
-            Probe::Unreadable => offline.push(mpath),
-            Probe::Opened { src, identity } => {
+            Probe::Unreadable { .. } => offline.push(mpath),
+            Probe::Opened { file: _, src, identity } => {
                 let info = src.info().clone();
                 let rebase = rebase_timecode.then_some(info.start_timecode).flatten();
                 s.edit("Link Media", |proj, _| {

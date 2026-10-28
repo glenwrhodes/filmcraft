@@ -240,3 +240,99 @@ fn a_failed_background_import_reports_its_error() {
     assert!(e.contains("SQLite"), "{e}");
     assert!(s.resolve_import.is_none());
 }
+
+#[test]
+fn a_dropped_import_leaves_no_stored_paths_behind() {
+    let (root, project) = library("resolve-stored");
+    let movie = p(&root.join("a.mov"));
+    let db = p(&project.join("Project.db"));
+    let cancelled = |s: &mut Session| {
+        s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+        s.execute("file.cancelResolveImport", json!({})).unwrap();
+        assert!(wait_for(s).unwrap_err().contains("cancelled"));
+    };
+    // nobody had recorded the movie: the cancelled import leaves no trace of it
+    let mut s = session();
+    cancelled(&mut s);
+    assert_eq!(s.media.stored_document(&movie), None);
+    // another document had: its entry stays as it was
+    let mut s = session();
+    s.media.add_stored_paths([movie.clone()], Some("other.fcproj"));
+    cancelled(&mut s);
+    assert_eq!(s.media.stored_document(&movie), Some(Some("other.fcproj".into())));
+    // an import that goes through keeps its own
+    let mut s = session();
+    s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+    wait_for(&mut s).unwrap();
+    assert_eq!(s.media.stored_document(&movie), Some(Some(db.clone().into())));
+    // one that goes through while another of the same files is pending keeps them when the
+    // pending one is cancelled (and its media stays linked)
+    let mut s = session();
+    s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+    let done = s.execute("file.importResolve", json!({ "path": p(&project) })).unwrap();
+    assert_eq!(done["linkedMedia"], 1, "{done}");
+    s.execute("file.cancelResolveImport", json!({})).unwrap();
+    assert!(wait_for(&mut s).unwrap_err().contains("cancelled"));
+    assert_eq!(s.media.stored_document(&movie), Some(Some(db.into())));
+    assert_eq!(s.media.follow(&movie).as_deref(), Ok(movie.as_str()));
+}
+
+/// The real filesystem, counting every read of files whose name ends in `watched`.
+struct Counting {
+    watched: &'static str,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl Counting {
+    fn hit(&self, path: &str) {
+        if path.ends_with(self.watched) {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+impl crate::Services for Counting {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        self.hit(path);
+        FsServices.read_file(path)
+    }
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        FsServices.write_file(path, data)
+    }
+    fn file_size(&self, path: &str) -> std::io::Result<u64> {
+        FsServices.file_size(path)
+    }
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        self.hit(path);
+        FsServices.read_range(path, offset, len)
+    }
+    fn reader(&self, path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+        self.hit(path);
+        FsServices.reader(path)
+    }
+}
+
+#[test]
+fn the_merge_does_not_read_a_failed_file_again() {
+    // the project's only media file is there but is no movie
+    let root = tmp_dir("resolve-unreadable");
+    let bad = root.join("bad.mov");
+    std::fs::write(&bad, vec![0x5a; 4096]).unwrap();
+    let project = root.join("Weekend Cut");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("Project.db"), database(&p(&bad))).unwrap();
+    let services = std::sync::Arc::new(Counting { watched: "bad.mov", reads: Default::default() });
+    let mut s = Session::new(services.clone());
+    s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+    // let the worker finish before the result is collected
+    let progress = s.resolve_import.as_ref().unwrap().progress.clone();
+    while progress.done.load(std::sync::atomic::Ordering::Relaxed) < 1 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let on_the_worker = services.reads.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(on_the_worker > 0, "the worker tried the file");
+    let done = wait_for(&mut s).unwrap();
+    assert_eq!(done["offlineMedia"].as_array().map(Vec::len), Some(1), "{done}");
+    assert_eq!(services.reads.load(std::sync::atomic::Ordering::Relaxed), on_the_worker, "the merge read it again");
+}
