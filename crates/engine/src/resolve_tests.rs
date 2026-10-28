@@ -336,3 +336,21 @@ fn the_merge_does_not_read_a_failed_file_again() {
     assert_eq!(done["offlineMedia"].as_array().map(Vec::len), Some(1), "{done}");
     assert_eq!(services.reads.load(std::sync::atomic::Ordering::Relaxed), on_the_worker, "the merge read it again");
 }
+
+#[test]
+fn an_import_never_lands_in_a_project_opened_meanwhile() {
+    let (_root, project) = library("resolve-replaced");
+    let mut s = session();
+    s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+    // the user starts a new project before the import has been merged
+    s.execute("file.newProject", json!({ "name": "Something Else" })).unwrap();
+    let revision = s.revision;
+    let items = s.project.items.len();
+    let e = wait_for(&mut s).unwrap_err();
+    assert!(e.contains("was closed"), "{e}");
+    assert_eq!((s.project.name.as_str(), s.project.items.len(), s.revision), ("Something Else", items, revision));
+    assert!(s.resolve_import.is_none());
+    // an import started in the new project goes through
+    s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+    assert_eq!(wait_for(&mut s).unwrap()["linkedMedia"], 1);
+}

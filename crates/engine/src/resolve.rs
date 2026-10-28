@@ -171,6 +171,9 @@ pub struct Running {
     pub path: String,
     pub progress: Arc<Progress>,
     result: Arc<Mutex<Option<std::result::Result<Prepared, String>>>>,
+    /// The session's [`Session::document_epoch`] when the import started: it merges only into
+    /// that project, never into one opened or created meanwhile.
+    epoch: u64,
 }
 
 /// Read a database and open its media files (no change to the project yet).
@@ -220,6 +223,7 @@ fn prepare_bytes(services: &dyn Services, media: &MediaPool, db: &str, bytes: &[
 }
 
 const CANCELLED: &str = "the DaVinci Resolve import was cancelled";
+const REPLACED: &str = "the DaVinci Resolve import was cancelled: the project it was importing into was closed";
 
 /// Merge what [`prepare`] read into the project.
 fn apply(s: &mut Session, mut p: Prepared) -> Result<Value> {
@@ -265,7 +269,7 @@ pub fn start(s: &mut Session, path: &str) -> Result<Value> {
             *worker_result.lock().unwrap_or_else(PoisonError::into_inner) = Some(r);
         })
         .map_err(|e| EngineError::Other(format!("cannot start the import: {e}")))?;
-    s.resolve_import = Some(Running { path: db.clone(), progress, result });
+    s.resolve_import = Some(Running { path: db.clone(), progress, result, epoch: s.document_epoch });
     Ok(json!({ "started": true, "path": db, "poll": "file.resolveImportStatus", "cancel": "file.cancelResolveImport" }))
 }
 
@@ -295,12 +299,19 @@ impl Session {
     /// still running). A cancelled import is an error and leaves the project as it was.
     pub fn poll_resolve_import(&mut self) -> Option<Result<Value>> {
         let running = self.resolve_import.as_ref()?;
+        // The project was replaced (opened, created, closed, recovered) since the import started:
+        // it belongs to a document that is gone. Stop the worker opening files for it.
+        let replaced = running.epoch != self.document_epoch;
+        if replaced {
+            running.progress.cancel.store(true, Ordering::Relaxed);
+        }
         let r = running.result.lock().unwrap_or_else(PoisonError::into_inner).take()?;
         // The worker looks at the flag only between media files: a cancel while it read the
         // database, after its last file, or for a project without media must still hold.
         let cancelled = running.progress.cancel.load(Ordering::Relaxed);
         self.resolve_import = None;
         Some(match r {
+            _ if replaced => Err(EngineError::Other(REPLACED.into())),
             Ok(_) if cancelled => Err(EngineError::Other(CANCELLED.into())),
             Ok(p) => apply(self, p),
             Err(e) => Err(EngineError::Other(e)),

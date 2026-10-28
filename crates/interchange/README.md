@@ -46,7 +46,9 @@ The engine's `file.listResolveProjects` finds projects in the standard library l
 Windows, macOS and Linux, and warns when a `Project.db-wal` holds changes Resolve has not yet
 written into the database. `file.importResolve {path, background: true}` reads the project and
 opens its media on a worker thread (the app shows "Linking media n of N" and can cancel);
-`file.resolveImportStatus` reports progress and merges the result once it is ready. Frame counts
+`file.resolveImportStatus` reports progress and merges the result once it is ready, into the
+project it was started in only: if that project is closed or replaced meanwhile, the import is
+cancelled. Frame counts
 whose ticks would leave the range a project can hold are reported and skipped, never clamped.
 
 ## AAF and OMF
