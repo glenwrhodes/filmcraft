@@ -75,7 +75,36 @@ pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Resu
         }
         _ => filmcraft_interchange::import_with(bytes, format, &opts).map_err(|e| EngineError::Other(format!("{path}: {e}")))?,
     };
-    merge_fragment(s, path, fragment, report, format.name(), opts.name.clone(), format == Format::Edl)
+    merge_fragment(s, path, fragment, report, format.name(), opts.name.clone(), format == Format::Edl, &mut std::collections::HashMap::new())
+}
+
+/// A media file of an imported document, opened ahead of [`merge_fragment`] (on a worker
+/// thread, for an import that runs in the background).
+pub(crate) enum Probe {
+    /// The stored path leads nowhere usable (why).
+    NotFollowed(String),
+    /// The file is there but cannot be read as media.
+    Unreadable,
+    Opened {
+        src: filmcraft_media::SharedSource,
+        identity: Option<filmcraft_project::MediaIdentity>,
+    },
+}
+
+/// Open the media file a document stores as `stored` (its stored paths must already be known to
+/// `media`: [`crate::media_pool::MediaPool::add_stored_paths`]).
+pub(crate) fn probe(media: &crate::media_pool::MediaPool, services: &dyn crate::Services, stored: &str) -> Probe {
+    let file = match media.follow(stored) {
+        Ok(file) => file,
+        Err(why) => return Probe::NotFollowed(why.to_string()),
+    };
+    match media.open_file(&file, services) {
+        Ok(src) => {
+            let identity = crate::relink::identity_of(services, &file).ok();
+            Probe::Opened { src, identity }
+        }
+        Err(_) => Probe::Unreadable,
+    }
 }
 
 /// Merge an imported fragment into the project (one undo step), link each media file that
@@ -89,6 +118,7 @@ pub(crate) fn merge_fragment(
     format_name: &str,
     name: Option<String>,
     rebase_timecode: bool,
+    probed: &mut std::collections::HashMap<String, Probe>,
 ) -> Result<Value> {
     for item in fragment.project.items.values() {
         if let ItemKind::Sequence(sequence) = &item.kind {
@@ -126,18 +156,16 @@ pub(crate) fn merge_fragment(
     let mut linked = 0;
     let mut offline = Vec::new();
     for (id, mpath) in new_media {
-        let file = match s.media.follow(&mpath) {
-            Ok(file) => file,
-            Err(why) => {
+        // opened already (in the background), or now
+        let opened = probed.remove(&mpath).unwrap_or_else(|| probe(&s.media, &*s.services, &mpath));
+        match opened {
+            Probe::NotFollowed(why) => {
                 log::warn!("{mpath} is not opened: {why}");
                 offline.push(mpath);
-                continue;
             }
-        };
-        match s.media.open_file(&file, &*s.services).ok() {
-            Some(src) => {
+            Probe::Unreadable => offline.push(mpath),
+            Probe::Opened { src, identity } => {
                 let info = src.info().clone();
-                let identity = crate::relink::identity_of(&*s.services, &file).ok();
                 let rebase = rebase_timecode.then_some(info.start_timecode).flatten();
                 s.edit("Link Media", |proj, _| {
                     if let Some(item) = proj.items.get_mut(&id)
@@ -158,7 +186,6 @@ pub(crate) fn merge_fragment(
                 s.media.insert_file(id, &mpath, src);
                 linked += 1;
             }
-            None => offline.push(mpath),
         }
     }
     if let Some(&first) = seqs.first() {

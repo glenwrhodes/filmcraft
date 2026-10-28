@@ -1595,11 +1595,14 @@ fn build() -> Vec<CommandSpec> {
             |s, p| crate::aaf_omf::export_omf(s, p)
         ),
         cmd!("file.importAaf", "Import AAF…", [], None, r#"{"path":str}"#, always, |s, p| crate::aaf_omf::import_document(s, p, "file.importAaf")),
-        cmd!("file.importResolve", "DaVinci Resolve Project…", ["File", "Import From"], None, r#"{"path":str}"#, always, |s, p| {
+        cmd!("file.importResolve", "DaVinci Resolve Project…", ["File", "Import From"], None, r#"{"path":str,"background":bool?}"#, always, |s, p| {
             let path =
                 str_p(p, "path").ok_or_else(|| bad("file.importResolve", "need `path`: a DaVinci Resolve project folder or its Project.db"))?.to_string();
-            crate::resolve::import(s, &path)
+            // in the background: the app stays responsive while the media files are opened
+            if bool_p(p, "background").unwrap_or(false) { crate::resolve::start(s, &path) } else { crate::resolve::import(s, &path) }
         }),
+        query!("file.resolveImportStatus", "DaVinci Resolve Import Status", "{}", |s, _| crate::resolve::status(s)),
+        cmd!("file.cancelResolveImport", "Cancel DaVinci Resolve Import", [], None, "{}", always, |s, _| Ok(json!({ "cancelled": s.cancel_resolve_import() }))),
         query!("file.listResolveProjects", "List DaVinci Resolve Projects", r#"{"root":str?}"#, |s, p| Ok(crate::resolve::list(s, str_p(p, "root")))),
         cmd!("file.save", "Save", ["File"], Some("Cmd+S"), r#"{"path":str?}"#, always, |s, p| {
             let path = str_p(p, "path").map(str::to_string).or_else(|| s.path.clone()).ok_or_else(|| bad("file.save", "no path (use Save As)"))?;

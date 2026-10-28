@@ -44,7 +44,10 @@ default of fitting a picture of another size to the timeline frame. Reported and
 clips, subtitle tracks, speed changes, effects, grades, transforms, audio levels and markers.
 The engine's `file.listResolveProjects` finds projects in the standard library locations on
 Windows, macOS and Linux, and warns when a `Project.db-wal` holds changes Resolve has not yet
-written into the database.
+written into the database. `file.importResolve {path, background: true}` reads the project and
+opens its media on a worker thread (the app shows "Linking media n of N" and can cancel);
+`file.resolveImportStatus` reports progress and merges the result once it is ready. Frame counts
+whose ticks would leave the range a project can hold are reported and skipped, never clamped.
 
 ## AAF and OMF
 

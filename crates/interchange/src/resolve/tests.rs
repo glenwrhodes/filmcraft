@@ -368,35 +368,53 @@ fn qt_maps_and_clip_records() {
     }
 }
 
+/// The sample project with timeline item `id`'s columns set to `values`.
+fn with_item(id: &str, values: &[(&str, Value)]) -> Vec<u8> {
+    let bytes = project();
+    let db = Database::open(&bytes).unwrap();
+    let mut w = Writer::new(1024);
+    for e in db.schema().iter().filter(|e| e.kind == "table") {
+        let (tbl, rows) = db.read_table(&e.name).unwrap();
+        let rows = rows
+            .into_iter()
+            .map(|mut r| {
+                if e.name == "Sm2TiItem" && r.values[0] == t(id) {
+                    for (col, v) in values {
+                        r.values[tbl.column(col).unwrap()] = v.clone();
+                    }
+                }
+                r.values
+            })
+            .collect();
+        w.table(&e.name, &e.sql, rows);
+    }
+    w.finish()
+}
+
 #[test]
 fn a_timeline_nesting_itself_is_cut_loose() {
     // Sub nests Main, which nests Sub
-    let bytes = project();
-    let db = Database::open(&bytes).unwrap();
-    let (tbl, mut rows) = db.read_table("Sm2TiItem").unwrap();
-    let media = tbl.column("MediaRef").unwrap();
-    let ty = tbl.column("DbType").unwrap();
-    let path = tbl.column("MediaFilePath").unwrap();
-    for r in &mut rows {
-        if r.values[0] == t("i11") {
-            r.values[media] = t("m-main");
-            r.values[ty] = t("Sm2TiVideoClip");
-            r.values[path] = NULL;
-        }
-    }
-    let sql = db.schema().iter().find(|e| e.name == "Sm2TiItem").unwrap().sql.clone();
-    let mut w = Writer::new(1024);
-    for e in db.schema().iter().filter(|e| e.kind == "table") {
-        let rows = if e.name == "Sm2TiItem" {
-            rows.iter().map(|r| r.values.clone()).collect()
-        } else {
-            db.read_table(&e.name).unwrap().1.into_iter().map(|r| r.values).collect()
-        };
-        w.table(&e.name, if e.name == "Sm2TiItem" { &sql } else { &e.sql }, rows);
-    }
-    let (imp, report) = import(&w.finish(), &ImportOptions::default()).unwrap();
+    let bytes = with_item("i11", &[("MediaRef", t("m-main")), ("DbType", t("Sm2TiVideoClip")), ("MediaFilePath", NULL)]);
+    let (imp, report) = import(&bytes, &ImportOptions::default()).unwrap();
     assert_eq!(imp.project.nest_cycle(), None);
     assert!(report.mentions("nests itself"), "{report}");
+}
+
+#[test]
+fn frame_counts_beyond_the_tick_range_are_skipped() {
+    // within MAX_FRAMES, but far past what Tick can hold at 25 fps: reported and skipped, not
+    // clamped into a clip at a meaningless time
+    let huge = (super::MAX_FRAMES - 1).to_string();
+    for (col, why) in
+        [("Start", "outside the time a sequence can hold"), ("Duration", "outside the time a sequence can hold"), ("In", "outside the time its source")]
+    {
+        let (imp, report) = import(&with_item("i2", &[(col, t(&huge))]), &ImportOptions::default()).unwrap();
+        let p = &imp.project;
+        let main = p.sequence(by_name(p, "Main")).unwrap();
+        assert_eq!(main.video_tracks[0].items.len(), 1, "{col}: the damaged clip is left out");
+        assert!(main.all_tracks().flat_map(|t| &t.items).all(|c| c.end() <= Tick::MAX && c.source_in <= Tick::MAX), "{col}");
+        assert!(report.mentions(why), "{col}: {report}");
+    }
 }
 
 #[test]

@@ -171,3 +171,65 @@ fn reports_what_is_not_a_resolve_project() {
     assert!(s.execute("file.importResolve", json!({ "path": p(&dir) })).is_err());
     assert!(s.execute("file.importResolve", json!({})).is_err());
 }
+
+/// Poll `file.resolveImportStatus` until the background import finishes (at most 30 s).
+fn wait_for(s: &mut Session) -> Result<serde_json::Value, String> {
+    for _ in 0..3000 {
+        match s.execute("file.resolveImportStatus", json!({})) {
+            Ok(v) if v["finished"] == json!(true) => return Ok(v),
+            Ok(v) => assert_eq!(v["running"], json!(true), "{v}"),
+            Err(e) => return Err(e.to_string()),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Err("the import did not finish".into())
+}
+
+#[test]
+fn imports_in_the_background() {
+    let (_root, project) = library("resolve-background");
+    let mut s = session();
+    let before = s.project.items.len();
+    let r = s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+    assert_eq!(r["started"], json!(true), "{r}");
+    // one at a time
+    assert!(s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).is_err());
+    let done = wait_for(&mut s).unwrap();
+    assert_eq!(done["format"], "DaVinci Resolve");
+    assert_eq!(done["linkedMedia"], 1, "{done}");
+    assert_eq!(done["sequences"].as_array().map(Vec::len), Some(1));
+    assert!(s.project.items.len() > before);
+    assert!(s.resolve_import.is_none());
+    assert_eq!(s.execute("file.resolveImportStatus", json!({})).unwrap()["running"], json!(false));
+}
+
+#[test]
+fn a_cancelled_background_import_changes_nothing() {
+    let (_root, project) = library("resolve-cancel");
+    let mut s = session();
+    let before = s.project.items.len();
+    let revision = s.revision;
+    s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+    assert_eq!(s.execute("file.cancelResolveImport", json!({})).unwrap()["cancelled"], json!(true));
+    // it may finish before it sees the flag; either way the project is whole
+    match wait_for(&mut s) {
+        Err(e) => {
+            assert!(e.contains("cancelled"), "{e}");
+            assert_eq!((s.project.items.len(), s.revision), (before, revision));
+        }
+        Ok(done) => assert_eq!(done["linkedMedia"], 1),
+    }
+    assert!(s.resolve_import.is_none());
+    assert_eq!(s.execute("file.cancelResolveImport", json!({})).unwrap()["cancelled"], json!(false));
+}
+
+#[test]
+fn a_failed_background_import_reports_its_error() {
+    let dir = tmp_dir("resolve-background-bad");
+    std::fs::write(dir.join("Project.db"), b"garbage").unwrap();
+    let mut s = session();
+    s.execute("file.importResolve", json!({ "path": p(&dir), "background": true })).unwrap();
+    let e = wait_for(&mut s).unwrap_err();
+    assert!(e.contains("SQLite"), "{e}");
+    assert!(s.resolve_import.is_none());
+}

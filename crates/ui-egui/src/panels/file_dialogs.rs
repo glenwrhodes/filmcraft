@@ -3,7 +3,8 @@
 //!
 //! Automation ids: `recovery.item.<n>`, `recovery.recover`, `recovery.discard`, `recovery.later`;
 //! `revert.yes`, `revert.no`; `importResolve.item.<n>`, `importResolve.import`,
-//! `importResolve.browse`, `importResolve.cancel`.
+//! `importResolve.browse`, `importResolve.cancel`; while importing `importResolve.progress`,
+//! `importResolve.cancelImport`.
 
 use egui::{Color32, CornerRadius, Frame, Margin, RichText, Stroke, Ui, vec2};
 use serde_json::json;
@@ -140,9 +141,38 @@ pub fn show_revert(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
     open && !(r.should_close() && !ctx.input(|i| i.pointer.any_down()))
 }
 
-/// Import a Resolve project and say how it went on the status line.
+/// Start importing a Resolve project in the background; this dialog shows its progress until
+/// [`finish_resolve_import`] reports the result.
 fn import_resolve(app: &mut FilmcraftApp, path: &str) -> Result<serde_json::Value, String> {
-    let r = app.session.execute("file.importResolve", json!({ "path": path })).map_err(|e| e.to_string());
+    let r = app.session.execute("file.importResolve", json!({ "path": path, "background": true })).map_err(|e| e.to_string());
+    match &r {
+        Ok(v) if v["started"] == json!(true) => app.dialog = Some(Dialog::ImportResolve),
+        // finished at once (no worker threads): report it now
+        _ => finish_resolve_import(app, r.clone()),
+    }
+    r
+}
+
+/// Collect a background Resolve import that has finished (called every frame) and say how it
+/// went on the status line.
+pub fn poll_resolve_import(app: &mut FilmcraftApp, ctx: &egui::Context) {
+    if app.session.resolve_import.is_none() {
+        return;
+    }
+    match app.session.poll_resolve_import() {
+        Some(r) => {
+            finish_resolve_import(app, r.map_err(|e| e.to_string()));
+            if app.dialog == Some(Dialog::ImportResolve) {
+                app.dialog = None;
+            }
+            app.file_dialogs.resolve_projects = None;
+        }
+        None => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+    }
+}
+
+/// Say how an import went on the status line.
+fn finish_resolve_import(app: &mut FilmcraftApp, r: Result<serde_json::Value, String>) {
     app.ui.status = match &r {
         Ok(v) => {
             let timelines = v["sequences"].as_array().map_or(0, Vec::len);
@@ -163,12 +193,66 @@ fn import_resolve(app: &mut FilmcraftApp, path: &str) -> Result<serde_json::Valu
         }
         Err(e) => e.clone(),
     };
-    r
+    // the dialog has gone: say so where it can't be missed
+    let now = app.now();
+    app.toast = Some((app.ui.status.clone(), now));
+}
+
+/// The import running in the background: what it is doing, a progress bar and Cancel.
+fn show_resolve_progress(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
+    let t = app.tokens;
+    let Some(running) = &app.session.resolve_import else { return false };
+    let name = std::path::Path::new(&running.path).parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let p = &running.progress;
+    let (done, total) = (p.done.load(std::sync::atomic::Ordering::Relaxed), p.total.load(std::sync::atomic::Ordering::Relaxed));
+    let stage = p.stage.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    let cancelling = p.cancel.load(std::sync::atomic::Ordering::Relaxed);
+    let mut cancel = false;
+    // (its own id: the list's modal would keep the list's height)
+    egui::Modal::new(egui::Id::unique("import-resolve-progress")).frame(modal_frame(&t)).show(ctx, |ui| {
+        ui.set_width(460.0);
+        Frame::new().inner_margin(Margin { left: 28, right: 28, top: 24, bottom: 20 }).show(ui, |ui| {
+            ui.label(RichText::new(tlf!("Importing “{name}”", name)).size(18.0).strong().color(t.text));
+            ui.add_space(10.0);
+            let (line, fraction) = if cancelling {
+                (tl!("Cancelling…").to_string(), None)
+            } else if stage == "Linking media" && total > 0 {
+                // (an empty bar animates until the first file is in)
+                (tlf!("Linking media {done} of {total}", done, total), (done > 0).then(|| done as f32 / total as f32))
+            } else {
+                (tl!("Reading the project…").to_string(), None)
+            };
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(14.0));
+                ui.label(RichText::new(line).size(13.0).color(t.text));
+            });
+            ui.add_space(8.0);
+            let bar = egui::ProgressBar::new(fraction.unwrap_or(0.0)).desired_width(ui.available_width());
+            let r = ui.add(if fraction.is_none() { bar.animate(true) } else { bar });
+            app.auto.add("importResolve.progress", r.rect, &format!("{done}/{total}"));
+            ui.add_space(16.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !cancelling && button(app, ui, "importResolve.cancelImport", tl!("Cancel"), false) {
+                    cancel = true;
+                }
+            });
+        });
+    });
+    if cancel {
+        app.session.cancel_resolve_import();
+    }
+    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    // stays up until the frame loop collects the result
+    true
 }
 
 /// File ▸ Import From ▸ DaVinci Resolve Project…: the projects in the local Resolve project
-/// libraries, newest first, or any project folder chosen with Browse….
+/// libraries, newest first, or any project folder chosen with Browse…. While one is being
+/// imported, its progress.
 pub fn show_import_resolve(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
+    if app.session.resolve_import.is_some() {
+        return show_resolve_progress(app, ctx);
+    }
     let t = app.tokens;
     if app.file_dialogs.resolve_projects.is_none() {
         let list = app.session.execute("file.listResolveProjects", json!({})).unwrap_or_default();
@@ -245,8 +329,9 @@ pub fn show_import_resolve(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool 
     });
     app.file_dialogs.resolve_choice = choice;
     if let Some(path) = import {
+        // the dialog turns into the import's progress
         let _ = import_resolve(app, &path);
-        open = false;
+        return app.dialog == Some(Dialog::ImportResolve) && app.session.resolve_import.is_some();
     } else if browse {
         // this dialog closes; the folder picker carries on (now, or on a later frame)
         open = false;

@@ -3,10 +3,17 @@
 //! by `filmcraft_interchange::resolve`; this module finds it and merges the result like any
 //! other interchange import.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use filmcraft_project::{ItemKind, MediaRef};
 use serde_json::{Value, json};
 
+use crate::interchange::{Probe, probe};
 use crate::media_browser::DirEntry;
-use crate::{EngineError, Result, Session};
+use crate::media_pool::MediaPool;
+use crate::{EngineError, Result, Services, Session};
 
 /// Where Resolve keeps its local ("disk") project libraries, relative to the home folder, on
 /// Windows, macOS and Linux; older versions called the library "Resolve Disk Database".
@@ -132,23 +139,175 @@ pub fn database_path(s: &Session, path: &str) -> String {
     if is_file { trimmed.to_string() } else { join(trimmed, PROJECT_FILE) }
 }
 
+/// What an import has read and opened before it changes the project.
+pub(crate) struct Prepared {
+    db: String,
+    fragment: filmcraft_interchange::Imported,
+    report: filmcraft_interchange::Report,
+    probed: HashMap<String, Probe>,
+}
+
+/// How far a background import has got (`file.resolveImportStatus`).
+#[derive(Default)]
+pub struct Progress {
+    /// Media files opened so far, of `total`.
+    pub done: AtomicUsize,
+    pub total: AtomicUsize,
+    pub stage: Mutex<String>,
+    /// Set to stop the import before it changes the project.
+    pub cancel: AtomicBool,
+}
+
+impl Progress {
+    fn set_stage(&self, stage: &str) {
+        *self.stage.lock().unwrap_or_else(PoisonError::into_inner) = stage.to_string();
+    }
+}
+
+/// An import running on a worker thread ([`Session::resolve_import`]): it reads the database
+/// and opens every media file there; [`Session::poll_resolve_import`] then merges the result.
+pub struct Running {
+    /// The `Project.db` being imported.
+    pub path: String,
+    pub progress: Arc<Progress>,
+    result: Arc<Mutex<Option<std::result::Result<Prepared, String>>>>,
+}
+
+/// Read a database and open its media files (no change to the project yet).
+fn prepare(services: &dyn Services, media: &MediaPool, db: &str, progress: &Progress) -> std::result::Result<Prepared, String> {
+    progress.set_stage("Reading the project");
+    let bytes = services.read_file(db).map_err(|e| format!("{db}: {e}"))?;
+    prepare_bytes(services, media, db, &bytes, progress)
+}
+
+fn prepare_bytes(services: &dyn Services, media: &MediaPool, db: &str, bytes: &[u8], progress: &Progress) -> std::result::Result<Prepared, String> {
+    // the project folder's name, for a database that names no project
+    let folder = std::path::Path::new(db).parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+    let opts = filmcraft_interchange::ImportOptions { name: folder, ..Default::default() };
+    let (fragment, mut report) = filmcraft_interchange::resolve::import(bytes, &opts).map_err(|e| format!("{db}: {e}"))?;
+    // Resolve writes recent changes to a write-ahead log first while the project is open
+    if services.file_size(&format!("{db}-wal")).is_ok_and(|n| n > 0) {
+        report.warn("DaVinci Resolve has changes that are not saved into Project.db yet (the project is probably open in Resolve): close it there and import again to include them");
+    }
+    let mut paths: Vec<String> = fragment
+        .project
+        .items
+        .values()
+        .filter_map(|i| match &i.kind {
+            ItemKind::Media(m) => match &m.media {
+                MediaRef::File { path } => Some(path.clone()),
+                MediaRef::Generator(_) => None,
+            },
+            _ => None,
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    media.add_stored_paths(paths.iter().cloned(), Some(db));
+    progress.total.store(paths.len(), Ordering::Relaxed);
+    progress.set_stage("Linking media");
+    let mut probed = HashMap::new();
+    for (n, path) in paths.into_iter().enumerate() {
+        if progress.cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
+        }
+        let p = probe(media, services, &path);
+        probed.insert(path, p);
+        progress.done.store(n + 1, Ordering::Relaxed);
+    }
+    Ok(Prepared { db: db.to_string(), fragment, report, probed })
+}
+
+const CANCELLED: &str = "the DaVinci Resolve import was cancelled";
+
+/// Merge what [`prepare`] read into the project.
+fn apply(s: &mut Session, mut p: Prepared) -> Result<Value> {
+    let name = p.fragment.project.name.clone();
+    crate::interchange::merge_fragment(s, &p.db, p.fragment, p.report, filmcraft_interchange::resolve::FORMAT_NAME, Some(name), false, &mut p.probed)
+}
+
 /// `file.importResolve {path}`: `path` is a project folder or its `Project.db`.
 pub fn import(s: &mut Session, path: &str) -> Result<Value> {
     let db = database_path(s, path);
-    let bytes = s.services.read_file(&db).map_err(|e| EngineError::Other(format!("{db}: {e}")))?;
-    import_bytes(s, &db, &bytes)
+    let p = prepare(&*s.services, &s.media, &db, &Progress::default()).map_err(EngineError::Other)?;
+    apply(s, p)
 }
 
 /// Import the bytes of a `Project.db` read from `db`.
 pub fn import_bytes(s: &mut Session, db: &str, bytes: &[u8]) -> Result<Value> {
-    // the project folder's name, for a database that names no project
-    let folder = std::path::Path::new(db).parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
-    let opts = filmcraft_interchange::ImportOptions { name: folder, ..Default::default() };
-    let (fragment, mut report) = filmcraft_interchange::resolve::import(bytes, &opts).map_err(|e| EngineError::Other(format!("{db}: {e}")))?;
-    // Resolve writes recent changes to a write-ahead log first while the project is open
-    if s.services.file_size(&format!("{db}-wal")).is_ok_and(|n| n > 0) {
-        report.warn("DaVinci Resolve has changes that are not saved into Project.db yet (the project is probably open in Resolve): close it there and import again to include them");
+    let p = prepare_bytes(&*s.services, &s.media, db, bytes, &Progress::default()).map_err(EngineError::Other)?;
+    apply(s, p)
+}
+
+/// `file.importResolve {path, background: true}`: read the project and open its media on a
+/// worker thread, so the app stays responsive; [`Session::poll_resolve_import`] (the UI, every
+/// frame) or `file.resolveImportStatus` merges it when it is ready. Without threads (the web)
+/// the import runs at once.
+pub fn start(s: &mut Session, path: &str) -> Result<Value> {
+    if s.resolve_import.is_some() {
+        return Err(EngineError::Other("a DaVinci Resolve import is already running".into()));
     }
-    let name = fragment.project.name.clone();
-    crate::interchange::merge_fragment(s, db, fragment, report, filmcraft_interchange::resolve::FORMAT_NAME, Some(name), false)
+    if cfg!(target_arch = "wasm32") {
+        return import(s, path);
+    }
+    let db = database_path(s, path);
+    let (services, media) = (s.services.clone(), s.media.clone());
+    let progress = Arc::new(Progress::default());
+    let result: Arc<Mutex<Option<std::result::Result<Prepared, String>>>> = Arc::default();
+    let (worker_progress, worker_result, worker_db) = (progress.clone(), result.clone(), db.clone());
+    std::thread::Builder::new()
+        .name("resolve-import".into())
+        .spawn(move || {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare(&*services, &media, &worker_db, &worker_progress)))
+                .unwrap_or_else(|_| Err(format!("{worker_db}: the import failed unexpectedly")));
+            *worker_result.lock().unwrap_or_else(PoisonError::into_inner) = Some(r);
+        })
+        .map_err(|e| EngineError::Other(format!("cannot start the import: {e}")))?;
+    s.resolve_import = Some(Running { path: db.clone(), progress, result });
+    Ok(json!({ "started": true, "path": db, "poll": "file.resolveImportStatus", "cancel": "file.cancelResolveImport" }))
+}
+
+/// `file.resolveImportStatus`: the running import's progress; once it has finished, merges it
+/// and returns its result as `file.importResolve` does (`finished: true`).
+pub fn status(s: &mut Session) -> Result<Value> {
+    if let Some(r) = s.poll_resolve_import() {
+        return r.map(|mut v| {
+            v["finished"] = json!(true);
+            v
+        });
+    }
+    Ok(match &s.resolve_import {
+        None => json!({ "running": false }),
+        Some(r) => json!({
+            "running": true,
+            "path": r.path,
+            "stage": r.progress.stage.lock().unwrap_or_else(PoisonError::into_inner).clone(),
+            "done": r.progress.done.load(Ordering::Relaxed),
+            "total": r.progress.total.load(Ordering::Relaxed),
+        }),
+    })
+}
+
+impl Session {
+    /// Merge a background Resolve import that has finished (`None` while none is, or it is
+    /// still running). A cancelled import is an error and leaves the project as it was.
+    pub fn poll_resolve_import(&mut self) -> Option<Result<Value>> {
+        let r = self.resolve_import.as_ref()?.result.lock().unwrap_or_else(PoisonError::into_inner).take()?;
+        self.resolve_import = None;
+        Some(match r {
+            Ok(p) => apply(self, p),
+            Err(e) => Err(EngineError::Other(e)),
+        })
+    }
+
+    /// Stop a running Resolve import before it changes the project.
+    pub fn cancel_resolve_import(&mut self) -> bool {
+        match &self.resolve_import {
+            Some(r) => {
+                r.progress.cancel.store(true, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
 }

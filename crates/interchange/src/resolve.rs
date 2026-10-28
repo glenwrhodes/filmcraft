@@ -266,6 +266,13 @@ fn frames(v: &Value) -> Option<i64> {
     (f.abs() <= MAX_FRAMES).then_some(f)
 }
 
+/// `f` frames at `rate` as ticks, or `None` beyond the tick range a project can hold (a damaged
+/// count would otherwise saturate in `tick_of` and land the clip at a meaningless time).
+fn ticks(rate: FrameRate, f: i64) -> Option<Tick> {
+    let t = rate.tick_of(f);
+    (Tick::MIN..=Tick::MAX).contains(&t).then_some(t)
+}
+
 fn hex_f64_le(s: &str) -> Option<f64> {
     let s = s.trim();
     if s.len() != 16 || !s.is_ascii() {
@@ -677,7 +684,7 @@ impl Imp<'_, '_> {
             {
                 spec.video = Some((w, h, rate));
                 if let Some(n) = time.get("NumFrames").and_then(QVal::int).filter(|n| *n > 0 && *n <= MAX_FRAMES) {
-                    spec.duration = Some(rate.tick_of(n));
+                    spec.duration = ticks(rate, n);
                 }
                 if let Some(s) = time.get("StartFrame").and_then(QVal::int).filter(|s| *s > 0 && *s <= MAX_FRAMES) {
                     spec.start_tc = Some(s);
@@ -841,8 +848,10 @@ impl Imp<'_, '_> {
                     self.report.warn(format!("timeline \"{seq_name}\": clip \"{name}\" has no position; skipped"));
                     continue;
                 };
-                let at = rate.tick_of(start.saturating_sub(origin).max(0));
-                let len = rate.tick_of(duration);
+                let (Some(at), Some(len)) = (ticks(rate, start.saturating_sub(origin).max(0)), ticks(rate, duration)) else {
+                    self.report.warn(format!("timeline \"{seq_name}\": clip \"{name}\" lies outside the time a sequence can hold; skipped"));
+                    continue;
+                };
                 match ty {
                     "Sm2TiVideoClip" | "Sm2TiAudioClip" => {}
                     "Sm2TiTransition" => {
@@ -870,7 +879,11 @@ impl Imp<'_, '_> {
                         inn -= tc;
                     }
                 }
-                let mut clip = self.b.clip(item, *kind, &name, at, len, src_rate.tick_of(inn));
+                let Some(source_in) = ticks(src_rate, inn) else {
+                    self.report.warn(format!("timeline \"{seq_name}\": clip \"{name}\" starts outside the time its source can hold; skipped"));
+                    continue;
+                };
+                let mut clip = self.b.clip(item, *kind, &name, at, len, source_in);
                 // Resolve fits a picture of another size to the timeline frame (its default
                 // "Scale entire image to fit"): Scale to Frame Size does the same
                 clip.scale_to_frame = *kind == TrackKind::Video;
