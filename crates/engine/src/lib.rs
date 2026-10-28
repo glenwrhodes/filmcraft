@@ -44,6 +44,7 @@ pub mod project_tools;
 pub mod proxies;
 pub mod relink;
 pub mod remix;
+pub mod resolve;
 pub mod scene_detect;
 pub mod scopes;
 pub mod sequence_extras;
@@ -1347,6 +1348,8 @@ mod proxies_tests;
 mod relink_tests;
 #[cfg(test)]
 mod remix_tests;
+#[cfg(test)]
+mod resolve_tests;
 #[cfg(test)]
 mod ripple_delete_tests;
 #[cfg(test)]

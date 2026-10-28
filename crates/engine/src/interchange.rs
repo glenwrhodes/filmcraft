@@ -75,13 +75,28 @@ pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Resu
         }
         _ => filmcraft_interchange::import_with(bytes, format, &opts).map_err(|e| EngineError::Other(format!("{path}: {e}")))?,
     };
+    merge_fragment(s, path, fragment, report, format.name(), opts.name.clone(), format == Format::Edl)
+}
+
+/// Merge an imported fragment into the project (one undo step), link each media file that
+/// exists on disk, and open the first new sequence. `rebase_timecode`: source positions count
+/// from the media's start timecode (EDL), so they are rebased once the file is probed.
+pub(crate) fn merge_fragment(
+    s: &mut Session,
+    path: &str,
+    fragment: filmcraft_interchange::Imported,
+    report: filmcraft_interchange::Report,
+    format_name: &str,
+    name: Option<String>,
+    rebase_timecode: bool,
+) -> Result<Value> {
     for item in fragment.project.items.values() {
         if let ItemKind::Sequence(sequence) = &item.kind {
             sequence.settings.validate().map_err(|e| EngineError::Other(format!("{path}: invalid imported sequence settings: {e}")))?;
         }
     }
     let before: std::collections::HashSet<ItemId> = s.project.items.keys().copied().collect();
-    let name = opts.name.clone().unwrap_or_else(|| format.name().to_string());
+    let name = name.unwrap_or_else(|| format_name.to_string());
     let seqs = s.edit(&format!("Import {name}"), |proj, _| {
         let seqs = filmcraft_interchange::merge_into(proj, fragment, None);
         // A document that sets only some Motion parameters leaves the others at their "auto"
@@ -123,7 +138,7 @@ pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Resu
             Some(src) => {
                 let info = src.info().clone();
                 let identity = crate::relink::identity_of(&*s.services, &file).ok();
-                let rebase = (format == Format::Edl).then_some(info.start_timecode).flatten();
+                let rebase = rebase_timecode.then_some(info.start_timecode).flatten();
                 s.edit("Link Media", |proj, _| {
                     if let Some(item) = proj.items.get_mut(&id)
                         && let ItemKind::Media(m) = &mut item.kind
@@ -153,7 +168,7 @@ pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Resu
         }
     }
     Ok(json!({
-        "format": format.name(),
+        "format": format_name,
         "sequences": seqs.iter().map(|i| i.0).collect::<Vec<_>>(),
         "linkedMedia": linked,
         "offlineMedia": offline,
