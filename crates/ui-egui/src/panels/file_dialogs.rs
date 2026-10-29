@@ -264,7 +264,13 @@ fn show_resolve_progress(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
 /// imported, its progress.
 pub fn show_import_resolve(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
     if app.session.resolve_import.is_some() {
-        return show_resolve_progress(app, ctx);
+        if app.file_dialogs.resolve_started {
+            return show_resolve_progress(app, ctx);
+        }
+        // a control-channel or MCP client's import: its result is the client's to collect, so
+        // its progress (which only that client ends) must not hold the user here
+        app.ui.status = tl!("A DaVinci Resolve import is already running.").to_string();
+        return false;
     }
     let t = app.tokens;
     if app.file_dialogs.resolve_projects.is_none() {
@@ -402,6 +408,11 @@ mod tests {
         assert_eq!(r["started"], json!(true));
         frames(&mut app, &ctx);
         assert!(app.session.resolve_import.is_some(), "the client's result is still waiting");
+        // the dialog, opened meanwhile, does not trap the user in that import's progress
+        app.dialog = Some(Dialog::ImportResolve);
+        assert!(!show_import_resolve(&mut app, &ctx), "the dialog closes");
+        assert!(app.ui.status.contains("already running"), "{}", app.ui.status);
+        assert!(app.session.resolve_import.is_some(), "and leaves the result to the client");
         let e = app.session.execute("file.resolveImportStatus", json!({})).unwrap_err().to_string();
         assert!(e.contains("Project.db"), "{e}");
         // the dialog's own import
