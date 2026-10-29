@@ -421,6 +421,28 @@ fn frame_counts_beyond_the_tick_range_are_skipped() {
 }
 
 #[test]
+fn an_unreadable_in_point_skips_the_clip() {
+    // a present In that is not a frame count: reported and skipped, never played from frame 0
+    let beyond = (super::MAX_FRAMES + 1).to_string();
+    for (what, v) in [("beyond MAX_FRAMES", t(&beyond)), ("unparsable", t("soon")), ("not finite", Value::Real(f64::NAN))] {
+        let (imp, report) = import(&with_item("i2", &[("In", v)]), &ImportOptions::default()).unwrap();
+        let p = &imp.project;
+        let main = p.sequence(by_name(p, "Main")).unwrap();
+        assert_eq!(main.video_tracks[0].items.len(), 1, "{what}: the damaged clip is left out");
+        assert!(report.mentions("clip \"a.mp4\" has an unreadable in point"), "{what}: {report}");
+    }
+    // an absent In is the start of the source
+    for (what, v) in [("null", NULL), ("empty", t(" "))] {
+        let (imp, report) = import(&with_item("i2", &[("In", v)]), &ImportOptions::default()).unwrap();
+        let p = &imp.project;
+        let main = p.sequence(by_name(p, "Main")).unwrap();
+        assert_eq!(main.video_tracks[0].items.len(), 2, "{what}: {report}");
+        assert!(main.video_tracks[0].items.iter().any(|c| c.source_in == Tick::ZERO), "{what}");
+        assert!(!report.mentions("in point"), "{what}: {report}");
+    }
+}
+
+#[test]
 fn damaged_projects_never_panic() {
     let bytes = project();
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;

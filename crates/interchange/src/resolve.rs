@@ -871,7 +871,15 @@ impl Imp<'_, '_> {
                     self.report.warn(format!("timeline \"{seq_name}\" contains itself; that clip is skipped"));
                     continue;
                 }
-                let mut inn = frames(items.get(row, "In")).unwrap_or(0).max(0);
+                // an absent In is the start of the source; one that is there but no frame count
+                // is damage, like a bad Start or Duration (not a clip that plays from frame 0)
+                let in_value = items.get(row, "In");
+                let absent = matches!(in_value, Value::Null) || in_value.as_str().is_some_and(|s| s.trim().is_empty());
+                let Some(inn) = (if absent { Some(0) } else { frames(in_value) }) else {
+                    self.report.warn(format!("timeline \"{seq_name}\": clip \"{name}\" has an unreadable In point; skipped"));
+                    continue;
+                };
+                let mut inn = inn.max(0);
                 // a source with a start timecode may count In from it
                 if let Some(mst) = items.get(row, "MediaStartTime").as_f64().filter(|s| s.is_finite() && *s > 0.0 && *s < 1e7) {
                     let tc = (mst * src_rate.as_f64()).round() as i64;
