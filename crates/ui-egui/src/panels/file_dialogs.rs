@@ -21,6 +21,10 @@ pub struct FileDialogState {
     /// once when the dialog opens.
     pub resolve_projects: Option<Vec<serde_json::Value>>,
     pub resolve_choice: usize,
+    /// The running Resolve import was started here (the dialog), so the frame loop collects it.
+    /// One started over the control channel or MCP is left to its client's
+    /// `file.resolveImportStatus`.
+    pub resolve_started: bool,
 }
 
 fn modal_frame(t: &Tokens) -> Frame {
@@ -146,21 +150,30 @@ pub fn show_revert(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
 fn import_resolve(app: &mut FilmcraftApp, path: &str) -> Result<serde_json::Value, String> {
     let r = app.session.execute("file.importResolve", json!({ "path": path, "background": true })).map_err(|e| e.to_string());
     match &r {
-        Ok(v) if v["started"] == json!(true) => app.dialog = Some(Dialog::ImportResolve),
+        Ok(v) if v["started"] == json!(true) => {
+            app.file_dialogs.resolve_started = true;
+            app.dialog = Some(Dialog::ImportResolve);
+        }
         // finished at once (no worker threads): report it now
         _ => finish_resolve_import(app, r.clone()),
     }
     r
 }
 
-/// Collect a background Resolve import that has finished (called every frame) and say how it
-/// went on the status line.
+/// Collect a background Resolve import this app started that has finished (called every frame)
+/// and say how it went on the status line.
 pub fn poll_resolve_import(app: &mut FilmcraftApp, ctx: &egui::Context) {
     if app.session.resolve_import.is_none() {
+        // (collected elsewhere, if at all: the next one may be a client's)
+        app.file_dialogs.resolve_started = false;
+        return;
+    }
+    if !app.file_dialogs.resolve_started {
         return;
     }
     match app.session.poll_resolve_import() {
         Some(r) => {
+            app.file_dialogs.resolve_started = false;
             finish_resolve_import(app, r.map_err(|e| e.to_string()));
             if app.dialog == Some(Dialog::ImportResolve) {
                 app.dialog = None;
@@ -361,5 +374,42 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context, d: Dialog) -> Option<bo
         Dialog::RevertConfirm => Some(show_revert(app, ctx)),
         Dialog::ImportResolve => Some(show_import_resolve(app, ctx)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use filmcraft_engine::Session;
+
+    /// Frames for two seconds: the worker reports a missing database long before that.
+    fn frames(app: &mut FilmcraftApp, ctx: &egui::Context) {
+        for _ in 0..200 {
+            poll_resolve_import(app, ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// An import a control-channel or MCP client started is the client's to collect: the frame
+    /// loop leaves its result to `file.resolveImportStatus`. One the dialog started, it collects.
+    #[test]
+    fn the_frame_loop_collects_only_the_imports_it_started() {
+        let ctx = egui::Context::default();
+        let missing = std::env::temp_dir().join("filmcraft-no-such-resolve-project").join("Project.db");
+        let missing = missing.to_string_lossy().into_owned();
+        let mut app = FilmcraftApp::new(Session::default());
+        let r = app.session.execute("file.importResolve", json!({ "path": missing, "background": true })).unwrap();
+        assert_eq!(r["started"], json!(true));
+        frames(&mut app, &ctx);
+        assert!(app.session.resolve_import.is_some(), "the client's result is still waiting");
+        let e = app.session.execute("file.resolveImportStatus", json!({})).unwrap_err().to_string();
+        assert!(e.contains("Project.db"), "{e}");
+        // the dialog's own import
+        let r = import_resolve(&mut app, &missing).unwrap();
+        assert_eq!(r["started"], json!(true));
+        frames(&mut app, &ctx);
+        assert!(app.session.resolve_import.is_none(), "collected by the frame loop");
+        assert!(!app.file_dialogs.resolve_started);
+        assert!(app.ui.status.contains("Project.db"), "{}", app.ui.status);
     }
 }
