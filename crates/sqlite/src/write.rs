@@ -48,6 +48,7 @@ impl Writer {
         out
     }
 
+    /// Bytes of each page that hold data (the writer reserves none).
     fn usable(&self) -> usize {
         self.page_size
     }
@@ -154,6 +155,8 @@ impl Writer {
         c
     }
 
+    /// Store a finished page: as page 1 when `on_page_one`, else after the others. Returns its
+    /// number.
     fn put(&self, pages: &mut Vec<Vec<u8>>, page: Vec<u8>, on_page_one: bool) -> u32 {
         if on_page_one {
             pages[0] = page;
@@ -186,6 +189,7 @@ fn page(cells: &[Vec<u8>], kind: u8, right: Option<u32>, first: bool, size: usiz
     p
 }
 
+/// The 100-byte database header, for `pages` pages of `page_size` bytes.
 fn header(h: &mut [u8], page_size: usize, pages: u32) {
     h[..16].copy_from_slice(MAGIC);
     let ps = if page_size == 65536 { 1 } else { page_size as u16 };

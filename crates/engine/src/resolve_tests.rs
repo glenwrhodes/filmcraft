@@ -12,6 +12,7 @@ use serde_json::json;
 use crate::media_test_util::{make_movie, tmp_dir};
 use crate::{FsServices, Session};
 
+/// A TEXT value.
 fn t(s: &str) -> Value {
     Value::Text(s.into())
 }
@@ -82,14 +83,18 @@ fn library(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     (root, project)
 }
 
+/// A session on the real file system.
 fn session() -> Session {
     Session::new(std::sync::Arc::new(FsServices))
 }
 
+/// `path` as commands take it.
 fn p(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// A library's projects are listed with their name, user, Project Manager folders and database; an
+/// empty or missing library lists none.
 #[test]
 fn lists_the_projects_of_a_library() {
     let (root, project) = library("resolve-list");
@@ -106,6 +111,7 @@ fn lists_the_projects_of_a_library() {
     assert_eq!(v["projects"], json!([]));
 }
 
+/// Importing a project folder brings in its timeline and links its media.
 #[test]
 fn imports_a_project_folder_and_links_its_media() {
     let (root, project) = library("resolve-import");
@@ -137,6 +143,7 @@ fn imports_a_project_folder_and_links_its_media() {
     assert!(s.project.items.len() <= before + 1);
 }
 
+/// `file.import` recognises a `Project.db` or a project folder and imports it as a Resolve project.
 #[test]
 fn file_import_recognises_a_project_database() {
     let (_root, project) = library("resolve-file-import");
@@ -148,6 +155,7 @@ fn file_import_recognises_a_project_database() {
     assert_eq!(r["sequences"].as_array().map(Vec::len), Some(1), "{r}");
 }
 
+/// A `Project.db-wal` holding changes Resolve has not saved yet is reported.
 #[test]
 fn warns_about_changes_still_in_the_write_ahead_log() {
     let (_root, project) = library("resolve-wal");
@@ -157,6 +165,7 @@ fn warns_about_changes_still_in_the_write_ahead_log() {
     assert!(r["report"].as_array().unwrap().iter().any(|m| m.as_str().unwrap().contains("not saved into Project.db yet")), "{r}");
 }
 
+/// Files and folders that are not Resolve projects are errors that say so.
 #[test]
 fn reports_what_is_not_a_resolve_project() {
     let dir = tmp_dir("resolve-bad");
@@ -185,6 +194,7 @@ fn wait_for(s: &mut Session) -> Result<serde_json::Value, String> {
     Err("the import did not finish".into())
 }
 
+/// A background import reports its progress and merges once it is ready.
 #[test]
 fn imports_in_the_background() {
     let (_root, project) = library("resolve-background");
@@ -203,6 +213,7 @@ fn imports_in_the_background() {
     assert_eq!(s.execute("file.resolveImportStatus", json!({})).unwrap()["running"], json!(false));
 }
 
+/// A cancelled background import leaves the project as it was.
 #[test]
 fn a_cancelled_background_import_changes_nothing() {
     let (_root, project) = library("resolve-cancel");
@@ -230,6 +241,7 @@ fn a_cancelled_background_import_changes_nothing() {
     assert_eq!(s.execute("file.cancelResolveImport", json!({})).unwrap()["cancelled"], json!(false));
 }
 
+/// A background import that cannot read its database reports why and ends.
 #[test]
 fn a_failed_background_import_reports_its_error() {
     let dir = tmp_dir("resolve-background-bad");
@@ -241,6 +253,8 @@ fn a_failed_background_import_reports_its_error() {
     assert!(s.resolve_import.is_none());
 }
 
+/// A dropped import records none of its media paths in the pool, and leaves another document's
+/// alone; a merged one records them with its database.
 #[test]
 fn a_dropped_import_leaves_no_stored_paths_behind() {
     let (root, project) = library("resolve-stored");
@@ -284,6 +298,7 @@ struct Counting {
 }
 
 impl Counting {
+    /// Count a read of `path` when it is a watched file.
     fn hit(&self, path: &str) {
         if path.ends_with(self.watched) {
             self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -312,6 +327,7 @@ impl crate::Services for Counting {
     }
 }
 
+/// A media file that failed to open in the background is not read again when the import is merged.
 #[test]
 fn the_merge_does_not_read_a_failed_file_again() {
     // the project's only media file is there but is no movie
@@ -337,6 +353,8 @@ fn the_merge_does_not_read_a_failed_file_again() {
     assert_eq!(services.reads.load(std::sync::atomic::Ordering::Relaxed), on_the_worker, "the merge read it again");
 }
 
+/// An import is dropped, not merged, when another project is created before it finishes; one
+/// started in the new project goes through.
 #[test]
 fn an_import_never_lands_in_a_project_opened_meanwhile() {
     let (_root, project) = library("resolve-replaced");
@@ -362,6 +380,7 @@ struct Gated {
 }
 
 impl crate::Services for Gated {
+    /// Hold a `Project.db` read until the gate opens.
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
         if path.ends_with("Project.db") {
             for _ in 0..1000 {

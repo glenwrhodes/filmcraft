@@ -14,6 +14,7 @@ pub(crate) struct Columns {
 /// Table constraints start with one of these (unquoted) words; anything else is a column.
 const CONSTRAINTS: [&str; 5] = ["CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"];
 
+/// The columns of a `CREATE TABLE` statement (`None` when it cannot be parsed).
 pub(crate) fn parse_create_table(sql: &str) -> Option<Columns> {
     let open = sql.find('(')?;
     let body_start = open + 1;

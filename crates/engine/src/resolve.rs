@@ -51,6 +51,7 @@ pub struct Found {
     pub size: Option<u64>,
 }
 
+/// `dir`/`name`, with the separator `dir` already uses.
 fn join(dir: &str, name: &str) -> String {
     let sep = if dir.contains('\\') && !dir.contains('/') { '\\' } else { '/' };
     if dir.ends_with(['/', '\\']) { format!("{dir}{name}") } else { format!("{dir}{sep}{name}") }
@@ -66,6 +67,7 @@ fn libraries(s: &Session, root: Option<&str>) -> Vec<String> {
     out
 }
 
+/// The entries of `dir` (none when it cannot be listed).
 fn entries(s: &Session, dir: &str) -> Vec<DirEntry> {
     match s.services.list_entries(dir) {
         Some(Ok(e)) => e,
@@ -97,6 +99,8 @@ pub fn find_projects(s: &Session, root: Option<&str>) -> Vec<Found> {
     out
 }
 
+/// Look for project folders (those holding a `Project.db`) under `dir`, at most [`MAX_DEPTH`] deep
+/// and [`MAX_DIRS`] directories in all.
 fn scan(s: &Session, dir: &str, user: &str, folder: &mut Vec<String>, depth: usize, budget: &mut usize, out: &mut Vec<Found>) {
     if depth > MAX_DEPTH || *budget == 0 {
         return;
@@ -159,6 +163,7 @@ pub struct Progress {
 }
 
 impl Progress {
+    /// Say what the import is doing (the `stage` of `file.resolveImportStatus`).
     fn set_stage(&self, stage: &str) {
         *self.stage.lock().unwrap_or_else(PoisonError::into_inner) = stage.to_string();
     }
@@ -183,6 +188,7 @@ fn prepare(services: &dyn Services, media: &MediaPool, db: &str, progress: &Prog
     prepare_bytes(services, media, db, &bytes, progress)
 }
 
+/// [`prepare`] for the bytes of the database at `db`, read already.
 fn prepare_bytes(services: &dyn Services, media: &MediaPool, db: &str, bytes: &[u8], progress: &Progress) -> std::result::Result<Prepared, String> {
     // the project folder's name, for a database that names no project
     let folder = std::path::Path::new(db).parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());

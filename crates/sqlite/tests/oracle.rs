@@ -9,10 +9,12 @@ use std::process::Command;
 use filmcraft_sqlite::write::Writer;
 use filmcraft_sqlite::{Database, Value};
 
+/// A Python with the `sqlite3` module, if one is installed.
 fn python() -> Option<&'static str> {
     ["python3", "python"].into_iter().find(|p| Command::new(p).args(["-c", "import sqlite3"]).output().is_ok_and(|o| o.status.success()))
 }
 
+/// Skip an oracle test (a failure under `FILMCRAFT_REQUIRE_ORACLES`).
 fn skip(why: &str) {
     if std::env::var_os("FILMCRAFT_REQUIRE_ORACLES").is_some() {
         panic!("{why}");
@@ -20,6 +22,7 @@ fn skip(why: &str) {
     eprintln!("skipping: {why}");
 }
 
+/// Where the oracle tests write their databases.
 fn dir() -> PathBuf {
     let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/sqlite");
     std::fs::create_dir_all(&d).unwrap();

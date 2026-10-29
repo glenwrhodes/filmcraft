@@ -6,25 +6,31 @@ use filmcraft_time::FrameRate;
 
 use super::*;
 
+/// A TEXT value.
 fn t(s: &str) -> Value {
     Value::Text(s.into())
 }
+/// An INTEGER value.
 fn n(i: i64) -> Value {
     Value::Integer(i)
 }
+/// A BLOB value.
 fn b(v: Vec<u8>) -> Value {
     Value::Blob(v)
 }
 const NULL: Value = Value::Null;
 
+/// A frame-rate blob.
 fn rate(fps: f64) -> Vec<u8> {
     let mut v = fps.to_le_bytes().to_vec();
     v.extend([0u8; 8]);
     v
 }
+/// A resolution blob.
 fn size(w: u64, h: u64) -> Vec<u8> {
     [w.to_be_bytes(), h.to_be_bytes()].concat()
 }
+/// A media-extents blob (start and duration in seconds).
 fn extents(start: f64, dur: f64) -> Vec<u8> {
     [start.to_le_bytes(), dur.to_le_bytes()].concat()
 }
@@ -66,6 +72,7 @@ fn qmap_bytes(entries: &[(&str, u32, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
+/// A row of a many-to-many link table.
 fn link(owner: &str, prop: &str, idx: i64, assoc: &str) -> Vec<Value> {
     vec![t(owner), t(assoc), t(prop), n(idx)]
 }
@@ -208,6 +215,7 @@ fn project() -> Vec<u8> {
     w.finish()
 }
 
+/// The bin named `name`, at or under `b`.
 fn bin_named<'a>(b: &'a Bin, name: &str) -> Option<&'a Bin> {
     if b.name == name {
         return Some(b);
@@ -215,14 +223,17 @@ fn bin_named<'a>(b: &'a Bin, name: &str) -> Option<&'a Bin> {
     b.children.iter().find_map(|c| if let BinEntry::Bin(x) = c { bin_named(x, name) } else { None })
 }
 
+/// Whether bin `b` holds item `id` itself.
 fn holds(b: &Bin, id: ItemId) -> bool {
     b.children.iter().any(|c| matches!(c, BinEntry::Item(i) if *i == id))
 }
 
+/// The item named `name`.
 fn by_name(p: &Project, name: &str) -> ItemId {
     p.items.values().find(|i| i.name == name).map(|i| i.id).unwrap_or_else(|| panic!("no item {name}"))
 }
 
+/// The synthetic project, imported (after checking it is recognised and named).
 fn imported() -> (Imported, Report) {
     let bytes = project();
     assert!(sniff(&bytes));
@@ -232,6 +243,7 @@ fn imported() -> (Imported, Report) {
 
 const FPS25: FrameRate = FrameRate { num: 25, den: 1 };
 
+/// Bins, Media Pool clips with their files and shape, and the timelines in the project's order.
 #[test]
 fn imports_bins_and_media() {
     let (imp, _) = imported();
@@ -259,6 +271,7 @@ fn imports_bins_and_media() {
     assert_eq!(music.info.kind, MediaKind::AudioOnly);
 }
 
+/// Timeline settings, the start timecode and the picture tracks with their clips.
 #[test]
 fn imports_picture_tracks() {
     let (imp, _) = imported();
@@ -286,6 +299,8 @@ fn imports_picture_tracks() {
     assert_eq!((v2.items[0].start, v2.items[0].source_in), (FPS25.tick_of(100), FPS25.tick_of(5)));
 }
 
+/// Sound tracks, links and crossfades, nested timelines and compound clips, and the report of what
+/// is skipped.
 #[test]
 fn imports_sound_nests_and_reports() {
     let (imp, report) = imported();
@@ -319,6 +334,7 @@ fn imports_sound_nests_and_reports() {
     assert_eq!(p.nest_cycle(), None);
 }
 
+/// A database that is not a Resolve project, and a file that is not a database, are refused.
 #[test]
 fn rejects_other_databases() {
     let mut w = Writer::new(4096);
@@ -330,6 +346,8 @@ fn rejects_other_databases() {
     assert!(matches!(import(b"plain text", &ImportOptions::default()), Err(Error::Parse { .. })));
 }
 
+/// Frame counts as Resolve writes them (integers, text, fractions, damaged values), and timecode in
+/// messages.
 #[test]
 fn frame_fields() {
     assert_eq!(frames(&t("86400")), Some(86400));
@@ -344,10 +362,12 @@ fn frame_fields() {
     assert_eq!(timecode(FrameRate::new(24, 1), 86400 + 24 * 61 + 5), "01:01:01:05");
 }
 
+/// `f` as the hex text Resolve writes after `|`.
 fn hex(f: f64) -> String {
     f.to_le_bytes().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Qt variant maps, and clip records with their folder and file name.
 #[test]
 fn qt_maps_and_clip_records() {
     let m = qmap(&qmap_bytes(&[("A", 2, (-5i32).to_be_bytes().to_vec()), ("B", 12, vec![1, 2, 3]), ("C", 99, vec![])]));
@@ -494,6 +514,7 @@ fn damaged_projects_never_panic() {
     }
 }
 
+/// The picture tracks of an imported timeline are video tracks.
 #[test]
 fn track_kinds() {
     let bytes = project();

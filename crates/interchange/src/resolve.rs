@@ -54,6 +54,7 @@ const MAX_FOLDER_DEPTH: usize = 64;
 /// Frame counts beyond a century at 1000 fps are damage.
 const MAX_FRAMES: i64 = 100 * 365 * 24 * 3600 * 1000;
 
+/// A parse error of this format.
 fn err(message: impl Into<String>) -> Error {
     Error::Parse { format: FORMAT_NAME, message: message.into() }
 }
@@ -63,6 +64,7 @@ pub fn sniff(bytes: &[u8]) -> bool {
     filmcraft_sqlite::sniff(bytes) && Database::open(bytes).is_ok_and(|db| is_resolve(&db))
 }
 
+/// Whether the database has Resolve's timeline tables.
 fn is_resolve(db: &Database) -> bool {
     ["Sm2Timeline", "Sm2Sequence", "Sm2TiTrack", "Sm2TiItem"].iter().all(|t| db.has_table(t))
 }
@@ -124,6 +126,7 @@ struct Tbl {
 static NULL: Value = Value::Null;
 
 impl Tbl {
+    /// Read table `name` (no rows when the database has no such table).
     fn load(db: &Database, name: &str) -> Result<Tbl> {
         match db.read_table(name) {
             Ok((table, rows)) => Ok(Tbl { table: Some(table), rows }),
@@ -131,6 +134,7 @@ impl Tbl {
             Err(e) => Err(err(format!("table {name}: {e}"))),
         }
     }
+    /// The value of column `col` in `row` (NULL when the table has no such column).
     fn get<'r>(&self, row: &'r Row, col: &str) -> &'r Value {
         match self.table.as_ref().and_then(|t| t.column(col)) {
             Some(i) => row.get(i),
@@ -141,6 +145,7 @@ impl Tbl {
     fn text<'r>(&self, row: &'r Row, col: &str) -> Option<&'r str> {
         self.get(row, col).as_str().map(str::trim).filter(|s| !s.is_empty())
     }
+    /// A non-empty BLOB value.
     fn blob<'r>(&self, row: &'r Row, col: &str) -> Option<&'r [u8]> {
         match self.get(row, col) {
             Value::Blob(b) if !b.is_empty() => Some(b),
@@ -189,6 +194,7 @@ struct Tables {
 }
 
 impl Tables {
+    /// Read every table the import uses, with each track's items in the track's order.
     fn load(db: &Database) -> Result<Tables> {
         let sequences = Tbl::load(db, "Sm2Sequence")?;
         let tracks = Tbl::load(db, "Sm2TiTrack")?;
@@ -273,6 +279,7 @@ fn ticks(rate: FrameRate, f: i64) -> Option<Tick> {
     (Tick::MIN..=Tick::MAX).contains(&t).then_some(t)
 }
 
+/// A little-endian double written as 16 hex digits.
 fn hex_f64_le(s: &str) -> Option<f64> {
     let s = s.trim();
     if s.len() != 16 || !s.is_ascii() {
@@ -321,6 +328,7 @@ enum QVal {
 }
 
 impl QVal {
+    /// The value as an integer (a finite real is truncated).
     fn int(&self) -> Option<i64> {
         match self {
             QVal::Int(i) => Some(*i),
@@ -420,6 +428,7 @@ fn clip_path(blob: &[u8]) -> Option<String> {
     })
 }
 
+/// The protobuf varint at `p`: its value and the position after it.
 fn varint(b: &[u8], mut p: usize) -> Option<(u64, usize)> {
     let mut v = 0u64;
     for shift in (0..64).step_by(7) {
@@ -433,6 +442,7 @@ fn varint(b: &[u8], mut p: usize) -> Option<(u64, usize)> {
     None
 }
 
+/// Decompress a zstd frame, at most [`MAX_RECORD`] bytes (`None` when it is damaged).
 fn decompress(frame: &[u8]) -> Option<Vec<u8>> {
     // a third-party decoder: a damaged frame must not take the import down with it
     std::panic::catch_unwind(|| {
@@ -474,6 +484,8 @@ struct PendingTransition {
 }
 
 impl Imp<'_, '_> {
+    /// Import everything: bins, a sequence for every timeline and compound clip, the Media Pool
+    /// clips, then each sequence's tracks.
     fn run(&mut self) {
         self.default_size = self.common_size();
         self.folders();
@@ -499,9 +511,11 @@ impl Imp<'_, '_> {
         counts.into_iter().max_by_key(|(s, n)| (*n, *s)).map(|(s, _)| s).unwrap_or((1920, 1080))
     }
 
+    /// Media Pool folders as bins, each under its parent folder's bin.
     fn folders(&mut self) {
         let t = &self.r.folders;
         let by_id = t.index("Sm2MpFolder_id");
+        /// The folder's parent folder.
         fn parent<'a>(t: &Tbl, r: &'a Row) -> Option<&'a str> {
             t.text(r, "MpFolder").or_else(|| t.text(r, "Sm2MpFolder_Owner_id"))
         }
@@ -539,11 +553,14 @@ impl Imp<'_, '_> {
         }
     }
 
+    /// The bin of a Media Pool item's folder (`None`: the project's root).
     fn bin_of_media(&self, row: &Row) -> Option<BinId> {
         let t = &self.r.media;
         t.text(row, "Sm2MpFolder_id").or_else(|| t.text(row, "MpFolder")).and_then(|f| self.bins.get(f).copied().flatten())
     }
 
+    /// A timeline's sequence settings: its frame rate and size (the most common size when it stores
+    /// none).
     fn settings(&self, seq_row: &Row) -> SequenceSettings {
         let t = &self.r.sequences;
         let rate = rate_blob(t.blob(seq_row, "FrameRate")).unwrap_or(FrameRate::FPS_24);
@@ -790,6 +807,7 @@ impl Imp<'_, '_> {
         (out, skipped)
     }
 
+    /// Fill sequence `id` from the Resolve sequence `seq_id`: tracks, clips, links and transitions.
     fn sequence(&mut self, seq_id: &str, id: ItemId) {
         let Some(&si) = self.r.sequence_by_id.get(seq_id) else { return };
         let seq_row = &self.r.sequences.rows[si];
@@ -1006,6 +1024,7 @@ fn transition_for(name: &str, audio: bool, report: &mut Report) -> filmcraft_pro
     transition_effect(name, audio, report)
 }
 
+/// A Resolve item type as the report names it.
 fn pretty_type(db_type: &str) -> &str {
     match db_type {
         "Sm2TiGenerator" => "generator or title",

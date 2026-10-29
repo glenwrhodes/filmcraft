@@ -82,10 +82,12 @@ pub struct Database<'a> {
     schema: Vec<SchemaEntry>,
 }
 
+/// The big-endian u16 at `at`.
 fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes([*b.get(at)?, *b.get(at.checked_add(1)?)?]))
 }
 
+/// The big-endian u32 at `at`.
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     let s = b.get(at..at.checked_add(4)?)?;
     Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
@@ -202,6 +204,7 @@ impl<'a> Database<'a> {
         Ok((t, rows))
     }
 
+    /// Page `n` (counting from 1), checked to lie inside the file.
     fn page(&self, n: u32) -> Result<&'a [u8]> {
         if n == 0 || n > self.page_count {
             return Err(corrupt(format!("page {n} is outside the file ({} pages)", self.page_count)));
@@ -343,6 +346,7 @@ impl<'a> Database<'a> {
         Ok(values)
     }
 
+    /// TEXT bytes, in the database's text encoding.
     fn text(&self, s: &[u8]) -> String {
         let units = |le: bool| s.chunks_exact(2).map(move |c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) });
         match self.encoding {

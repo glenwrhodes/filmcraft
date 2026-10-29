@@ -1,6 +1,8 @@
 use crate::write::Writer;
 use crate::*;
 
+/// `n` rows of every value shape: small and large integers, reals and NULLs, blobs, multi-byte
+/// text.
 fn sample_rows(n: usize) -> Vec<Vec<Value>> {
     (0..n)
         .map(|i| {
@@ -17,6 +19,7 @@ fn sample_rows(n: usize) -> Vec<Vec<Value>> {
 
 const SQL: &str = "CREATE TABLE \"T\" (\r\n \"Id\" uuid NOT NULL, \"N\" bigint, \"R\" double precision, \"B\" BLOB, \"S\" character varying,\r\n CONSTRAINT \"T_pkey\" PRIMARY KEY (\"Id\"))";
 
+/// Varints of every length read back as written.
 #[test]
 fn varints_round_trip() {
     for v in [0u64, 1, 127, 128, 240, 2287, 16383, 16384, 1 << 21, (1 << 56) - 1, 1 << 56, u64::MAX, 0xff00_0000_0000_0001] {
@@ -28,6 +31,7 @@ fn varints_round_trip() {
     assert_eq!(read_varint(&[0x81], 0), None, "truncated");
 }
 
+/// Column names and the row id alias from `CREATE TABLE` statements.
 #[test]
 fn columns_from_create_table() {
     let c = schema::parse_create_table(SQL).unwrap();
@@ -45,6 +49,7 @@ fn columns_from_create_table() {
     assert!(schema::parse_create_table("CREATE TABLE broken (a, b").is_none());
 }
 
+/// Tables from one page up to several interior levels read back exactly.
 #[test]
 fn writer_round_trips_every_shape() {
     // one page, several leaves under one interior page, and several interior levels
@@ -71,6 +76,7 @@ fn writer_round_trips_every_shape() {
     }
 }
 
+/// Values larger than a page go to overflow chains and read back whole.
 #[test]
 fn large_values_use_overflow_chains() {
     let big: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
@@ -88,6 +94,8 @@ fn large_values_use_overflow_chains() {
     assert_eq!(rows[1].get(1).as_str(), Some("small"));
 }
 
+/// An `INTEGER PRIMARY KEY` reads as the row id, and rows written before a column was added read it
+/// as NULL.
 #[test]
 fn rowid_alias_and_added_columns() {
     let mut w = Writer::new(4096);
@@ -107,6 +115,7 @@ fn rowid_alias_and_added_columns() {
     assert_eq!(rows[1].get(2).as_str(), Some("z"));
 }
 
+/// Files that are not SQLite, and tables this reader does not read (`WITHOUT ROWID`), are errors.
 #[test]
 fn rejects_what_it_cannot_read() {
     assert_eq!(Database::open(b"not a database").err(), Some(Error::NotSqlite));
@@ -121,6 +130,7 @@ fn rejects_what_it_cannot_read() {
     assert!(matches!(Database::open(&bad), Err(Error::Corrupt(_))));
 }
 
+/// A b-tree whose pages point back at each other is an error, not an endless walk.
 #[test]
 fn page_cycles_are_errors() {
     let mut w = Writer::new(512);
@@ -136,6 +146,7 @@ fn page_cycles_are_errors() {
     assert!(matches!(db.read_table("T"), Err(Error::Corrupt(_))));
 }
 
+/// Truncated and bit-flipped files are errors, never a panic.
 #[test]
 fn damaged_files_never_panic() {
     let mut w = Writer::new(512);

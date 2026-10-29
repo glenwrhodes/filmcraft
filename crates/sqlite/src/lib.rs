@@ -52,6 +52,7 @@ pub enum Value {
 }
 
 impl Value {
+    /// Whether this is NULL.
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
@@ -117,6 +118,7 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// An [`Error::Corrupt`] saying `m`.
 pub(crate) fn corrupt(m: impl Into<String>) -> Error {
     Error::Corrupt(m.into())
 }
@@ -166,6 +168,7 @@ pub(crate) fn write_varint(v: u64, out: &mut Vec<u8>) {
     }
 }
 
+/// How many bytes [`write_varint`] writes for `v`.
 pub(crate) fn varint_len(v: u64) -> usize {
     let mut out = Vec::with_capacity(9);
     write_varint(v, &mut out);
