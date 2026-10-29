@@ -311,10 +311,13 @@ impl Session {
     pub fn poll_resolve_import(&mut self) -> Option<Result<Value>> {
         let running = self.resolve_import.as_ref()?;
         // The project was replaced (opened, created, closed, recovered) since the import started:
-        // it belongs to a document that is gone. Stop the worker opening files for it.
-        let replaced = running.epoch != self.document_epoch;
-        if replaced {
+        // it belongs to a document that is gone. Stop the worker opening files for it and end the
+        // import now, without waiting for the worker (it may be in a long read): whatever it still
+        // produces goes into a result nobody holds, and it recorded nothing in the shared pool.
+        if running.epoch != self.document_epoch {
             running.progress.cancel.store(true, Ordering::Relaxed);
+            self.resolve_import = None;
+            return Some(Err(EngineError::Other(REPLACED.into())));
         }
         let r = running.result.lock().unwrap_or_else(PoisonError::into_inner).take()?;
         // The worker looks at the flag only between media files: a cancel while it read the
@@ -322,7 +325,6 @@ impl Session {
         let cancelled = running.progress.cancel.load(Ordering::Relaxed);
         self.resolve_import = None;
         Some(match r {
-            _ if replaced => Err(EngineError::Other(REPLACED.into())),
             Ok(_) if cancelled => Err(EngineError::Other(CANCELLED.into())),
             Ok(p) => apply(self, p),
             Err(e) => Err(EngineError::Other(e)),

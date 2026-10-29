@@ -355,6 +355,54 @@ fn an_import_never_lands_in_a_project_opened_meanwhile() {
     assert_eq!(wait_for(&mut s).unwrap()["linkedMedia"], 1);
 }
 
+/// The real filesystem, holding every read of a `Project.db` until `open` is set (at most five
+/// seconds): a large project, or one on a slow drive.
+struct Gated {
+    open: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::Services for Gated {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        if path.ends_with("Project.db") {
+            for _ in 0..1000 {
+                if self.open.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        FsServices.read_file(path)
+    }
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        FsServices.write_file(path, data)
+    }
+    fn file_size(&self, path: &str) -> std::io::Result<u64> {
+        FsServices.file_size(path)
+    }
+    fn reader(&self, path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+        FsServices.reader(path)
+    }
+}
+
+/// An import whose project was replaced ends at once, even while its worker is still reading:
+/// the app does not wait on it, and a new import can start straight away.
+#[test]
+fn a_replaced_import_ends_without_waiting_for_its_worker() {
+    let (_root, project) = library("resolve-replaced-busy");
+    let open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut s = Session::new(std::sync::Arc::new(Gated { open: open.clone() }));
+    s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+    s.execute("file.newProject", json!({ "name": "Something Else" })).unwrap();
+    // the worker is still inside its read of the database
+    let e = s.execute("file.resolveImportStatus", json!({})).unwrap_err().to_string();
+    assert!(e.contains("was closed"), "{e}");
+    assert!(s.resolve_import.is_none());
+    s.execute("file.importResolve", json!({ "path": p(&project), "background": true })).unwrap();
+    open.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(wait_for(&mut s).unwrap()["linkedMedia"], 1);
+    assert_eq!(s.project.name, "Something Else");
+}
+
 /// A relative media path is the database's, in the background and at once: it opens the file next
 /// to `Project.db` even when another document stored the same text first, and the project keeps
 /// that file, not text a saved project would take from its own folder.
