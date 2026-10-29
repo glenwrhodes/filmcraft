@@ -394,6 +394,34 @@ fn with_item(id: &str, values: &[(&str, Value)]) -> Vec<u8> {
     w.finish()
 }
 
+/// Sibling bins come in the Media Pool's order on every import (not a HashMap's, which changes
+/// from run to run).
+#[test]
+fn bins_keep_the_media_pool_order() {
+    let names: Vec<String> = (0..8).map(|n| format!("B{n}")).collect();
+    let bytes = project();
+    let db = Database::open(&bytes).unwrap();
+    let mut w = Writer::new(1024);
+    for e in db.schema().iter().filter(|e| e.kind == "table") {
+        let (_, rows) = db.read_table(&e.name).unwrap();
+        let mut rows: Vec<Vec<Value>> = rows.into_iter().map(|r| r.values).collect();
+        if e.name == "Sm2MpFolder" {
+            rows.extend(names.iter().map(|n| vec![t(&format!("f-{n}")), t("Sm2MpFolder"), t(n), t("f-root")]));
+        }
+        w.table(&e.name, &e.sql, rows);
+    }
+    let (imp, _) = import(&w.finish(), &ImportOptions::default()).unwrap();
+    let bins: Vec<&str> = imp
+        .project
+        .root
+        .children
+        .iter()
+        .filter_map(|c| if let BinEntry::Bin(b) = c { Some(b.name.as_str()) } else { None })
+        .filter(|n| n.starts_with('B'))
+        .collect();
+    assert_eq!(bins, names);
+}
+
 #[test]
 fn a_timeline_nesting_itself_is_cut_loose() {
     // Sub nests Main, which nests Sub

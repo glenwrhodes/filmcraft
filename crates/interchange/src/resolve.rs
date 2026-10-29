@@ -505,8 +505,11 @@ impl Imp<'_, '_> {
         fn parent<'a>(t: &Tbl, r: &'a Row) -> Option<&'a str> {
             t.text(r, "MpFolder").or_else(|| t.text(r, "Sm2MpFolder_Owner_id"))
         }
-        for (id, &i) in &by_id {
-            let mut chain = vec![(id.clone(), i)];
+        // in row (Media Pool) order: a HashMap's order changes from run to run
+        for row in &t.rows {
+            let Some(id) = t.text(row, "Sm2MpFolder_id") else { continue };
+            let Some(&i) = by_id.get(id) else { continue };
+            let mut chain = vec![(id.to_string(), i)];
             // walk up to a folder that already has a bin (or the root)
             while let Some(&(_, at)) = chain.last() {
                 let Some(p) = parent(t, &t.rows[at]) else { break };
