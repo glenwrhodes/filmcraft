@@ -110,6 +110,11 @@ impl Writer {
                     used += 4 + varint_len(level[end - 1].1 as u64) + 2;
                     end += 1;
                 }
+                // never leave one child over: alone on a page it would have no key (SQLite reads
+                // a non-root interior page without cells as corrupt)
+                if level.len() - end == 1 && end - start > 2 {
+                    end -= 1;
+                }
                 let (cells, right) = interior(&level[start..end]);
                 let n = self.put(pages, page(&cells, 0x05, Some(right), false, self.page_size), false);
                 next.push((n, level[end - 1].1));

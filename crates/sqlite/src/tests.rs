@@ -170,3 +170,22 @@ fn damaged_files_never_panic() {
         assert!(std::panic::catch_unwind(|| read_all(&b)).is_ok(), "bit flips, round {round}");
     }
 }
+
+/// No interior b-tree page but page 1 is written without cells (SQLite reads one as corrupt),
+/// even when packing the interior pages of a level leaves a single child over.
+#[test]
+fn interior_pages_always_hold_a_key() {
+    for n in 100..=500 {
+        let rows: Vec<Vec<Value>> = (0..n).map(|i| vec![Value::Blob(vec![i as u8; 200])]).collect();
+        let mut w = Writer::new(512);
+        w.table("T", "CREATE TABLE T (b BLOB)", rows);
+        let bytes = w.finish();
+        let db = Database::open(&bytes).unwrap();
+        assert_eq!(db.read_table("T").unwrap().1.len(), n, "{n} rows");
+        for (k, page) in bytes.chunks(512).enumerate().skip(1) {
+            if page[0] == 0x05 {
+                assert!(u16::from_be_bytes([page[3], page[4]]) > 0, "{n} rows: interior page {} has no cells", k + 1);
+            }
+        }
+    }
+}
