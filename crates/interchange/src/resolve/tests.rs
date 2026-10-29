@@ -336,6 +336,9 @@ fn frame_fields() {
     assert_eq!(frames(&t("140909|0080f1155ff1b53f")), Some(140909), "a small fraction rounds down");
     assert_eq!(frames(&t(&format!("10|{}", hex(0.75)))), Some(11));
     assert_eq!(frames(&n(-3)), Some(-3));
+    // i64::MIN has no absolute value: rejected, never an overflow
+    assert_eq!(frames(&n(i64::MIN)), None);
+    assert_eq!(frames(&t(&i64::MIN.to_string())), None);
     assert_eq!(frames(&t("x")), None);
     assert_eq!(frames(&t("99999999999999999")), None);
     assert_eq!(timecode(FrameRate::new(24, 1), 86400 + 24 * 61 + 5), "01:01:01:05");

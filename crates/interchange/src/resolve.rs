@@ -263,7 +263,7 @@ fn frames(v: &Value) -> Option<i64> {
         }
         _ => return None,
     };
-    (f.abs() <= MAX_FRAMES).then_some(f)
+    f.checked_abs().is_some_and(|a| a <= MAX_FRAMES).then_some(f)
 }
 
 /// `f` frames at `rate` as ticks, or `None` beyond the tick range a project can hold (a damaged
